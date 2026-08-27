@@ -19,15 +19,15 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "huggingface-hub[hf-xet]>=1.0,<2",
-    "httpx>=0.28,<1",
-    "internetarchive>=5.4.2,<6",
-    "mutagen>=1.47,<2",
-    "pyarrow>=21,<24",
-    "pydantic>=2.11,<3",
-    "rich>=14,<15",
-    "tenacity>=9.1,<10",
-    "typer>=0.17,<1",
+    "huggingface-hub[hf-xet]>=1.0",
+    "httpx>=0.28",
+    "internetarchive>=5.4.2",
+    "mutagen>=1.47",
+    "pyarrow>=21",
+    "pydantic>=2.11",
+    "rich>=14",
+    "tenacity>=9.1",
+    "typer>=0.17",
 ]
 
 [project.scripts]
@@ -35,21 +35,24 @@ librivox-mirror = "librivox_mirror.cli:main"
 
 [dependency-groups]
 dev = [
-    "hypothesis>=6.138,<7",
-    "pytest>=8.4,<10",
-    "pytest-cov>=6.2,<8",
-    "respx>=0.22,<1",
-    "ruff>=0.12,<1",
+    "hypothesis>=6.138",
+    "pytest>=8.4",
+    "pytest-cov>=6.2",
+    "respx>=0.22",
+    "ruff>=0.12",
     "ty>=0.0.1a20",
 ]
 integration = [
-    "datasets[audio]>=4,<5",
-    "webdataset>=1,<2",
+    "datasets[audio]>=4",
+    "webdataset>=1",
 ]
 
 [build-system]
-requires = ["uv_build>=0.12.6,<0.13"]
+requires = ["uv_build>=0.11.2,<0.13"]
 build-backend = "uv_build"
+
+[tool.uv]
+exclude-newer = "3 days"
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers"
