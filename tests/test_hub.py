@@ -112,9 +112,11 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
     assert metadata["language"] == "multilingual"
     assert metadata["license"] == "cc-by-4.0"
     assert "Last updated (UTC) | `2026-08-27T18:30:00Z`" in content
-    assert "Ding, James" in content
+    assert "last_updated-2026--08--27T18%3A30%3A00Z" in content
+    assert "logo=creativecommons" in content
+    assert "LibriVox Mirror maintainers" in content
     assert "https://huggingface.co/datasets/owner/librivox" in content
-    assert "does not impose new restrictions" in content
+    assert "is not relicensed by this mirror" in content
 
 
 def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
