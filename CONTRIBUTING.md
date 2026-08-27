@@ -29,4 +29,5 @@ real call sites establish what it represents. Preserve complete upstream metadat
 at source boundaries, and keep transformations deterministic.
 
 Use Conventional Commits. Keep changes narrow enough that each commit can be
-formatted, type-checked, tested, and reviewed independently.
+formatted, type-checked, tested, and reviewed independently. Release Please uses
+those commit types to prepare versions and changelogs.

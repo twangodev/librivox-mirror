@@ -140,11 +140,16 @@ Configure these GitHub settings before enabling scheduled publication:
 
 - repository variable `HF_DATASET_REPO`, such as `owner/librivox`
 - repository secret `HF_TOKEN` with write access to that dataset
-- PyPI Trusted Publisher for the `pypi` environment before pushing a `v*` tag
+- PyPI Trusted Publisher for the `pypi` environment before merging the first
+  Release Please release pull request
 
 GitHub Actions and uv are pinned to immutable, cooldown-cleared versions. Renovate
 keeps the lockfile and Action digests current while applying the same three-day
 minimum release age.
+
+Conventional Commits drive the Release Please pull request. Merging that pull
+request creates the version tag and GitHub release, then publishes the package to
+PyPI through Trusted Publishing in the same verified workflow run.
 
 ## Rights
 
