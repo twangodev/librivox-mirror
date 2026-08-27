@@ -1,0 +1,75 @@
+[project]
+name = "librivox-mirror"
+version = "0.1.0"
+description = "Continuously mirror LibriVox audiobooks into ML-ready Hugging Face datasets"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Multimedia :: Sound/Audio",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "huggingface-hub[hf-xet]>=1.0,<2",
+    "httpx>=0.28,<1",
+    "internetarchive>=5.4.2,<6",
+    "mutagen>=1.47,<2",
+    "pyarrow>=21,<24",
+    "pydantic>=2.11,<3",
+    "rich>=14,<15",
+    "tenacity>=9.1,<10",
+    "typer>=0.17,<1",
+]
+
+[project.scripts]
+librivox-mirror = "librivox_mirror.cli:main"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.138,<7",
+    "pytest>=8.4,<10",
+    "pytest-cov>=6.2,<8",
+    "respx>=0.22,<1",
+    "ruff>=0.12,<1",
+    "ty>=0.0.1a20",
+]
+integration = [
+    "datasets[audio]>=4,<5",
+    "webdataset>=1,<2",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.6,<0.13"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers"
+testpaths = ["tests"]
+markers = [
+    "integration: requires optional integration dependencies",
+    "live: accesses live LibriVox, Internet Archive, or Hugging Face services",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["A", "ASYNC", "B", "C4", "E", "F", "I", "N", "PERF", "PIE", "PTH", "RUF", "SIM", "UP", "W"]
+
+[tool.coverage.run]
+branch = true
+source = ["librivox_mirror"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
