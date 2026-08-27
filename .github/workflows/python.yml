@@ -23,9 +23,10 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: 0.12.5
+          python-version: ${{ matrix.python-version }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - run: uv sync --locked --python ${{ matrix.python-version }} --group dev --no-group integration
+      - run: uv sync --locked --group dev --no-group integration
       - run: uv lock --check
       - run: uv run ruff format --check .
       - run: uv run ruff check .
@@ -45,9 +46,10 @@ jobs:
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           version: 0.12.5
+          python-version: "3.12"
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - run: uv sync --locked --python 3.12 --group dev --group integration
+      - run: uv sync --locked --group dev --group integration
       - run: uv run pytest -m integration
 
   release_please:
@@ -61,38 +63,13 @@ jobs:
       pull-requests: write
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - id: release
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-      - name: Check out the release pull request
-        if: steps.release.outputs.prs_created == 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
-      - name: Install uv
-        if: steps.release.outputs.prs_created == 'true'
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          version: 0.12.5
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-      - name: Refresh the release lockfile
-        if: steps.release.outputs.prs_created == 'true'
-        env:
-          RELEASE_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
-        run: |
-          uv lock
-          if git diff --quiet -- uv.lock; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add uv.lock
-          git commit -m "chore: refresh release lockfile"
-          git push origin "HEAD:$RELEASE_BRANCH"
 
   publish:
     name: Publish to PyPI
@@ -114,5 +91,8 @@ jobs:
           version: 0.12.5
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - env:
+          RELEASE_VERSION: ${{ needs.release_please.outputs.version }}
+        run: uv version "$RELEASE_VERSION" --no-sync
       - run: uv build --no-sources
       - run: uv publish --trusted-publishing always

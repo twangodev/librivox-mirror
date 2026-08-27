@@ -17,7 +17,7 @@ def test_version() -> None:
     result = runner.invoke(app, ["version"])
 
     assert result.exit_code == 0
-    assert unstyle(result.stdout).strip() == "0.1.0"
+    assert unstyle(result.stdout).strip() == "0.0.0"
 
 
 def test_help_names_the_command() -> None:
@@ -34,7 +34,7 @@ def test_json_version_keeps_stdout_machine_readable() -> None:
     result = runner.invoke(app, ["--json", "version"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == {"version": "0.1.0"}
+    assert json.loads(result.stdout) == {"version": "0.0.0"}
 
 
 @respx.mock

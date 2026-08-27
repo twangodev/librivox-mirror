@@ -1,6 +1,6 @@
 [project]
 name = "librivox-mirror"
-version = "0.1.0"
+version = "0.0.0"
 description = "Continuously mirror LibriVox audiobooks into ML-ready Hugging Face datasets"
 readme = "README.md"
 requires-python = ">=3.12"
