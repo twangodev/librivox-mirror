@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -144,7 +145,25 @@ class HubPublisher:
             path = self._download("state/sync.json")
         except MISSING_REMOTE:
             return SyncState()
-        return SyncState.model_validate_json(path.read_text())
+        state = SyncState.model_validate_json(path.read_text())
+        if state.schema_version < 2:
+            return state.model_copy(
+                update={
+                    "schema_version": 2,
+                    "audio_seconds_by_language": self._load_audio_seconds_by_language(),
+                }
+            )
+        return state
+
+    def _load_audio_seconds_by_language(self) -> dict[str, int]:
+        paths = self.api.list_repo_files(self.repo_id, repo_type="dataset")
+        section_paths = sorted(
+            path
+            for path in paths
+            if path.startswith("metadata/sections/") and path.endswith(".parquet")
+        )
+        sections = [row for path in section_paths for row in self._load_rows(path, SECTION_SCHEMA)]
+        return audio_seconds_by_language(sections)
 
     def has_current_book(self, book: Book) -> bool:
         bucket = book.metadata_bucket
@@ -198,6 +217,10 @@ class HubPublisher:
                     + state_delta.published_sections,
                     "quarantined_books": updated_state.quarantined_books
                     + state_delta.quarantined_books,
+                    "audio_seconds_by_language": merge_audio_seconds_by_language(
+                        updated_state.audio_seconds_by_language,
+                        state_delta.audio_seconds_by_language,
+                    ),
                 }
             )
 
@@ -286,6 +309,7 @@ class HubPublisher:
             published_books=len(books) - len(old_books),
             published_sections=len(sections) - len(old_sections),
             quarantined_books=len(quarantine_rows) - len(old_quarantine),
+            audio_seconds_by_language=audio_seconds_delta(old_sections, sections),
         )
         return additions, delta
 
@@ -339,6 +363,32 @@ def metadata_path(kind: str, bucket: int) -> str:
 
 def artifact_repo_path(book_id: int) -> str:
     return f"data/{book_id // 1000:03d}/{book_id:06d}.tar"
+
+
+def audio_seconds_by_language(sections: list[dict[str, Any]]) -> dict[str, int]:
+    totals: Counter[str] = Counter()
+    for section in sections:
+        language = (section["language"] or "").strip() or "Unknown"
+        totals[language] += section["duration_seconds"] or 0
+    return dict(totals)
+
+
+def audio_seconds_delta(
+    old_sections: list[dict[str, Any]],
+    new_sections: list[dict[str, Any]],
+) -> dict[str, int]:
+    delta = Counter(audio_seconds_by_language(new_sections))
+    delta.subtract(audio_seconds_by_language(old_sections))
+    return dict(delta)
+
+
+def merge_audio_seconds_by_language(
+    current: dict[str, int],
+    delta: dict[str, int],
+) -> dict[str, int]:
+    merged = Counter(current)
+    merged.update(delta)
+    return {language: seconds for language, seconds in merged.items() if seconds > 0}
 
 
 def book_row(artifact: BookArtifact) -> dict[str, object]:
@@ -427,6 +477,7 @@ def dataset_card(state: SyncState, repo_id: str) -> str:
     )
     repo_url = f"https://huggingface.co/datasets/{quote(repo_id, safe='/')}"
     updated_at_badge = quote(updated_at.replace("-", "--"), safe="")
+    total_audio_seconds = sum(state.audio_seconds_by_language.values())
     return _DATASET_CARD_TEMPLATE.substitute(
         repo_url=repo_url,
         updated_at=updated_at,
@@ -434,4 +485,23 @@ def dataset_card(state: SyncState, repo_id: str) -> str:
         published_books=f"{state.published_books:,}",
         published_sections=f"{state.published_sections:,}",
         quarantined_books=f"{state.quarantined_books:,}",
+        audio_hours=format_audio_hours(total_audio_seconds),
+        audio_languages=f"{len(state.audio_seconds_by_language):,}",
+        audio_by_language=audio_by_language_table(state.audio_seconds_by_language),
     )
+
+
+def audio_by_language_table(audio_seconds: dict[str, int]) -> str:
+    if not audio_seconds:
+        return "No audio published yet."
+    rows = ["| Language | Hours |", "| --- | ---: |"]
+    ordered = sorted(audio_seconds.items(), key=lambda item: (-item[1], item[0].casefold()))
+    rows.extend(
+        f"| {language.replace('|', '&#124;')} | {format_audio_hours(seconds)} |"
+        for language, seconds in ordered
+    )
+    return "\n".join(rows)
+
+
+def format_audio_hours(seconds: int) -> str:
+    return f"{seconds / 3600:,.1f}"

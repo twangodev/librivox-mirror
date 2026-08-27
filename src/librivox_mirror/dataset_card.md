@@ -40,8 +40,14 @@ Fast, structured, continuously updated LibriVox audio mirror.
 | --- | ---: |
 | Published books | $published_books |
 | Published sections | $published_sections |
+| Audio hours | $audio_hours |
+| Audio languages | $audio_languages |
 | Quarantined books | $quarantined_books |
 | Last updated (UTC) | `$updated_at` |
+
+## Audio by language
+
+$audio_by_language
 
 ## Dataset structure
 

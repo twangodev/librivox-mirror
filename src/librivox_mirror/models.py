@@ -137,11 +137,12 @@ class QuarantineRecord(MirrorModel):
 
 
 class SyncState(MirrorModel):
-    schema_version: int = 1
+    schema_version: int = 2
     catalog_watermark: int = 0
     published_books: int = 0
     published_sections: int = 0
     quarantined_books: int = 0
+    audio_seconds_by_language: dict[str, int] = Field(default_factory=dict)
     updated_at: datetime | None = None
 
 

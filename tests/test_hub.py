@@ -47,6 +47,9 @@ class FakeApi:
     def file_exists(self, repo_id, filename, **kwargs):
         return filename in self.files
 
+    def list_repo_files(self, *args, **kwargs):
+        return sorted(self.files)
+
     def preupload_lfs_files(self, repo_id, additions, **kwargs):
         self.preuploads.append(list(additions))
 
@@ -102,6 +105,7 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
             published_books=12,
             published_sections=345,
             quarantined_books=6,
+            audio_seconds_by_language={"English": 36_000, "French": 9_000},
             updated_at=datetime(2026, 8, 27, 18, 30, tzinfo=UTC),
         ),
         "owner/librivox",
@@ -112,6 +116,10 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
     assert metadata["language"] == "multilingual"
     assert metadata["license"] == "cc-by-4.0"
     assert "Last updated (UTC) | `2026-08-27T18:30:00Z`" in content
+    assert "Audio hours | 12.5" in content
+    assert "Audio languages | 2" in content
+    assert "| English | 10.0 |" in content
+    assert "| French | 2.5 |" in content
     assert "last_updated-2026--08--27T18%3A30%3A00Z" in content
     assert "logo=creativecommons" in content
     assert "LibriVox Mirror maintainers" in content
@@ -139,6 +147,7 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert result.revision == "revision-1"
     assert result.state.published_books == 1
     assert result.state.published_sections == 1
+    assert result.state.audio_seconds_by_language == {"English": 1}
     paths = {operation.path_in_repo for operation in api.commits[0][0]}
     assert paths == {
         "data/000/000047.tar",
@@ -158,6 +167,46 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert "Last updated (UTC)" in card
     assert "license: cc-by-4.0" in card
     assert publisher.has_current_book(book)
+
+
+def test_load_sync_state_migrates_audio_statistics(book: Book, tmp_path, monkeypatch) -> None:
+    api = FakeApi()
+    source = MissingRemotePublisher(
+        "owner/librivox",
+        token=None,
+        working_directory=tmp_path / "source",
+        api=cast(HfApi, api),
+    )
+    source.publish(
+        [make_artifact(book, tmp_path)],
+        [],
+        SyncState(),
+        commit_message="feat(data): mirror book 47",
+    )
+    legacy_state = tmp_path / "sync.json"
+    legacy_state.write_text(
+        SyncState(schema_version=1, published_books=1, published_sections=1).model_dump_json(
+            exclude={"audio_seconds_by_language"}
+        )
+    )
+    remote_files = {
+        "state/sync.json": legacy_state,
+        "metadata/sections/000.parquet": (
+            tmp_path / "source/metadata/metadata/sections/000.parquet"
+        ),
+    }
+    publisher = HubPublisher(
+        "owner/librivox",
+        token=None,
+        working_directory=tmp_path / "migrated",
+        api=cast(HfApi, api),
+    )
+    monkeypatch.setattr(publisher, "_download", remote_files.__getitem__)
+
+    state = publisher.load_sync_state()
+
+    assert state.schema_version == 2
+    assert state.audio_seconds_by_language == {"English": 1}
 
 
 def test_quarantine_replaces_current_artifact_and_metadata(book: Book, tmp_path) -> None:
@@ -193,6 +242,7 @@ def test_quarantine_replaces_current_artifact_and_metadata(book: Book, tmp_path)
     assert second.state.published_books == 0
     assert second.state.published_sections == 0
     assert second.state.quarantined_books == 1
+    assert second.state.audio_seconds_by_language == {}
     assert "data/000/000047.tar" not in api.files
     quarantine = pq.read_table(
         tmp_path / "hub/metadata/metadata/quarantine/000.parquet"
