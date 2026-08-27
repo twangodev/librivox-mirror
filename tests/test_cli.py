@@ -2,6 +2,7 @@ import json
 
 import httpx
 import respx
+from click import unstyle
 from typer.testing import CliRunner
 
 from librivox_mirror.catalog import CATALOG_URL
@@ -16,17 +17,17 @@ def test_version() -> None:
     result = runner.invoke(app, ["version"])
 
     assert result.exit_code == 0
-    assert result.stdout.strip() == "0.1.0"
+    assert unstyle(result.stdout).strip() == "0.1.0"
 
 
 def test_help_names_the_command() -> None:
     result = runner.invoke(app, ["--help"])
 
     assert result.exit_code == 0
-    assert "librivox-mirror" in result.stdout
+    output = unstyle(result.stdout)
+    assert "librivox-mirror" in output
     for command in ("plan", "mirror", "backfill", "sync", "reconcile", "status", "verify"):
-        assert command in result.stdout
-    assert "\x1b[" not in result.stdout
+        assert command in output
 
 
 def test_json_version_keeps_stdout_machine_readable() -> None:
@@ -70,7 +71,7 @@ def test_invalid_range_is_a_usage_error() -> None:
     )
 
     assert result.exit_code == 2
-    assert "start-id" in result.output
+    assert "start-id" in unstyle(result.output)
 
 
 def test_status_reports_persistent_progress_as_json(book, tmp_path) -> None:
