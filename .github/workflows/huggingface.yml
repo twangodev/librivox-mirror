@@ -48,7 +48,8 @@ jobs:
           version: 0.12.5
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - run: uv sync --locked --no-group dev --no-group integration
+      - id: install
+        run: uv sync --locked --no-group dev --no-group integration
       - run: >-
           uv run librivox-mirror sync
           --max-books "$MAX_BOOKS"
@@ -56,6 +57,11 @@ jobs:
           --jobs 2
           --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
           --staging "$RUNNER_TEMP/librivox-mirror/staging"
+      - name: Report checkpoint status
+        if: always() && steps.install.outcome == 'success'
+        run: >-
+          uv run librivox-mirror status
+          --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
 
   reconcile:
     name: Reconcile changed books
@@ -77,7 +83,8 @@ jobs:
           version: 0.12.5
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - run: uv sync --locked --no-group dev --no-group integration
+      - id: install
+        run: uv sync --locked --no-group dev --no-group integration
       - run: >-
           uv run librivox-mirror reconcile
           --max-books "$MAX_BOOKS"
@@ -85,3 +92,8 @@ jobs:
           --jobs 2
           --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
           --staging "$RUNNER_TEMP/librivox-mirror/staging"
+      - name: Report checkpoint status
+        if: always() && steps.install.outcome == 'success'
+        run: >-
+          uv run librivox-mirror status
+          --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
