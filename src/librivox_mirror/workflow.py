@@ -44,9 +44,11 @@ class MirrorRunner:
     def prepare_book(self, book: Book) -> BookOutcome:
         checkpoint = self.state.discover(book)
         if checkpoint.status == BookStatus.PUBLISHED:
+            self.cleanup_paths(book.id, checkpoint.artifact_path)
             logger.info("Book %s is already published", book.id)
             return BookOutcome(book=book, skipped=True)
         if self.publisher and self.publisher.has_current_book(book):
+            self.cleanup_paths(book.id, checkpoint.artifact_path)
             self.state.transition(book.id, BookStatus.PUBLISHED)
             logger.info("Book %s already matches the Hub", book.id)
             return BookOutcome(book=book, skipped=True)
@@ -120,6 +122,10 @@ class MirrorRunner:
         return result
 
     def cleanup(self, artifact: BookArtifact) -> None:
-        download_directory = self.staging_directory / "downloads" / f"{artifact.book.id:06d}"
+        self.cleanup_paths(artifact.book.id, artifact.path)
+
+    def cleanup_paths(self, book_id: int, artifact_path: Path | None) -> None:
+        download_directory = self.staging_directory / "downloads" / f"{book_id:06d}"
         shutil.rmtree(download_directory, ignore_errors=True)
-        artifact.path.unlink(missing_ok=True)
+        if artifact_path:
+            artifact_path.unlink(missing_ok=True)

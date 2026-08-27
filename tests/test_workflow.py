@@ -103,3 +103,23 @@ def test_prepare_book_quarantines_without_downloading(book: Book, tmp_path) -> N
     assert outcome.artifact is None
     assert checkpoint is not None
     assert checkpoint.status == BookStatus.QUARANTINED
+
+
+def test_published_resume_cleans_staging_without_source_requests(book: Book, tmp_path) -> None:
+    staging = tmp_path / "staging"
+    download_directory = staging / "downloads/000047"
+    download_directory.mkdir(parents=True)
+    (download_directory / "section.mp3").write_bytes(b"staged")
+    artifact = staging / "repository/data/000/000047.tar"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(b"staged")
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        state.discover(book)
+        state.transition(book.id, BookStatus.PACKED, artifact_path=artifact)
+        state.transition(book.id, BookStatus.PUBLISHED)
+
+        outcome = make_runner(book, None, tmp_path, state).prepare_book(book)
+
+    assert outcome.skipped
+    assert not download_directory.exists()
+    assert not artifact.exists()
