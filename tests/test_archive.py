@@ -1,12 +1,15 @@
 import hashlib
 import json
 
+import httpx
 import pytest
 
 from librivox_mirror.archive import (
+    DOWNLOAD_ATTEMPTS,
     DownloadIntegrityError,
     InternetArchiveClient,
     QuarantinedBookError,
+    SourceUnavailableError,
     archive_identifier,
     resolve_original_files,
     verify_download,
@@ -26,6 +29,18 @@ class StubDownloadClient(InternetArchiveClient):
         if self.attempts <= self.integrity_failures:
             raise DownloadIntegrityError("transient checksum mismatch")
         return hashlib.sha256(self.content).hexdigest()
+
+
+class StatusDownloadClient(InternetArchiveClient):
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        self.attempts = 0
+
+    def _download_once(self, identifier, archive_file, partial):
+        self.attempts += 1
+        request = httpx.Request("GET", "https://archive.org/download/test/chapter.mp3")
+        response = httpx.Response(self.status_code, request=request)
+        raise httpx.HTTPStatusError("download failed", request=request, response=response)
 
 
 def archive_rows() -> list[dict[str, str]]:
@@ -129,3 +144,27 @@ def test_download_retries_integrity_failures(book: Book, tmp_path, monkeypatch) 
     assert downloaded.path.read_bytes() == b"original audio"
     assert client.attempts == 2
     assert not downloaded.path.with_suffix(".mp3.partial").exists()
+
+
+def test_download_exhaustion_becomes_a_deferred_source_failure(
+    book: Book, tmp_path, monkeypatch
+) -> None:
+    resolved = resolve_original_files(book, "a_test_book", archive_rows())
+    client = StubDownloadClient(b"original audio", integrity_failures=DOWNLOAD_ATTEMPTS)
+    monkeypatch.setattr("librivox_mirror.archive.time.sleep", lambda _: None)
+
+    with pytest.raises(SourceUnavailableError, match=f"after {DOWNLOAD_ATTEMPTS} attempt"):
+        client.download_section("a_test_book", resolved.sections[0], tmp_path)
+
+    assert client.attempts == DOWNLOAD_ATTEMPTS
+    assert not (tmp_path / "000047-00000091.mp3.partial").exists()
+
+
+def test_non_retryable_download_status_is_deferred_immediately(book: Book, tmp_path) -> None:
+    resolved = resolve_original_files(book, "a_test_book", archive_rows())
+    client = StatusDownloadClient(404)
+
+    with pytest.raises(SourceUnavailableError, match="after 1 attempt"):
+        client.download_section("a_test_book", resolved.sections[0], tmp_path)
+
+    assert client.attempts == 1

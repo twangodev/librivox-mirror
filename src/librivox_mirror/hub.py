@@ -220,6 +220,15 @@ class HubPublisher:
             exist_ok=True,
         )
 
+    def invalidate_cache(self) -> None:
+        self._rows_cache.clear()
+
+    def current_revision(self) -> str:
+        revision = self.api.repo_info(self.repo_id, repo_type="dataset").sha
+        if revision is None:
+            raise RuntimeError(f"dataset {self.repo_id!r} has no current revision")
+        return revision
+
     def load_sync_state(self) -> SyncState:
         try:
             path = self._download("state/sync.json")

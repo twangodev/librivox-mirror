@@ -27,8 +27,10 @@ from librivox_mirror.models import (
     Section,
     canonical_metadata_json,
 )
+from librivox_mirror.network import is_transient_http_error
 
 ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
+DOWNLOAD_ATTEMPTS = 10
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,10 @@ class QuarantinedBookError(Exception):
 
 
 class DownloadIntegrityError(OSError):
+    pass
+
+
+class SourceUnavailableError(OSError):
     pass
 
 
@@ -98,7 +104,12 @@ class InternetArchiveClient:
                 QuarantineCode.ARCHIVE_IDENTIFIER_MISSING,
                 f"could not parse an Internet Archive identifier from {book.url_iarchive!r}",
             )
-        item = self._get_item(identifier)
+        try:
+            item = self._get_item(identifier)
+        except requests.RequestException as error:
+            raise SourceUnavailableError(
+                f"could not load Internet Archive item {identifier!r}: {error}"
+            ) from error
         if not item.exists:
             raise quarantine(
                 book,
@@ -147,19 +158,26 @@ class InternetArchiveClient:
                 return DownloadedSection(resolved=resolved, path=path, sha256=sha256)
 
         partial = path.with_suffix(".mp3.partial")
-        for attempt in range(1, 6):
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
             try:
                 sha256 = self._download_once(identifier, resolved.archive_file, partial)
                 partial.replace(path)
                 return DownloadedSection(resolved=resolved, path=path, sha256=sha256)
             except (httpx.TransportError, httpx.HTTPStatusError, DownloadIntegrityError) as error:
                 partial.unlink(missing_ok=True)
-                if attempt == 5:
-                    raise
+                retryable = isinstance(error, DownloadIntegrityError) or is_transient_http_error(
+                    error
+                )
+                if not retryable or attempt == DOWNLOAD_ATTEMPTS:
+                    raise SourceUnavailableError(
+                        f"could not download {resolved.archive_file.name!r} after "
+                        f"{attempt} attempt(s): {error}"
+                    ) from error
                 logger.warning(
-                    "Retrying %s after attempt %s failed: %s",
+                    "Retrying %s after attempt %s/%s failed: %s",
                     resolved.archive_file.name,
                     attempt,
+                    DOWNLOAD_ATTEMPTS,
                     error,
                 )
                 time.sleep(min(2**attempt, 30))

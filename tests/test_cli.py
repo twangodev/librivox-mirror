@@ -1,14 +1,17 @@
 import json
+from typing import cast
 
 import httpx
 import respx
 from click import unstyle
+from typer import Context
 from typer.testing import CliRunner
 
 from librivox_mirror.catalog import CATALOG_URL
-from librivox_mirror.cli import app
-from librivox_mirror.models import BookStatus
+from librivox_mirror.cli import app, publish_batches
+from librivox_mirror.models import Book, BookStatus, SyncState
 from librivox_mirror.state import RunLock, StateStore
+from librivox_mirror.workflow import BookOutcome, MirrorRunner
 
 runner = CliRunner()
 
@@ -114,3 +117,38 @@ def test_status_reports_the_active_run(book, tmp_path) -> None:
     active_run = json.loads(result.stdout)["active_run"]
     assert active_run["pid"] > 0
     assert active_run["started_at"]
+
+
+class RecordingRunner:
+    def __init__(self) -> None:
+        self.states: list[SyncState] = []
+
+    def publish(self, outcomes, sync_state, *, commit_message):
+        self.states.append(sync_state)
+        return None
+
+
+def test_failed_batches_do_not_advance_the_catalog_watermark(book: Book, monkeypatch) -> None:
+    books = [book, book.model_copy(update={"id": 48})]
+    runner = RecordingRunner()
+
+    def prepare(context, mirror_runner, batch):
+        return [
+            BookOutcome(book=item, error="SourceUnavailableError: unavailable")
+            if item.id == book.id
+            else BookOutcome(book=item, skipped=True)
+            for item in batch
+        ]
+
+    monkeypatch.setattr("librivox_mirror.cli.prepare_books", prepare)
+
+    publish_batches(
+        cast(Context, None),
+        cast(MirrorRunner, runner),
+        books,
+        SyncState(catalog_watermark=10),
+        commit_size=1,
+        final_catalog_watermark=20,
+    )
+
+    assert runner.states[-1].catalog_watermark == 10

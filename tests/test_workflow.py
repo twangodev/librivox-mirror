@@ -1,6 +1,7 @@
 import hashlib
 from typing import cast
 
+import httpx
 import pytest
 
 from librivox_mirror.archive import (
@@ -79,6 +80,13 @@ class FailingArchive:
         raise RuntimeError("connection lost")
 
 
+class UnavailableArchive:
+    def resolve_book(self, book):
+        from librivox_mirror.archive import SourceUnavailableError
+
+        raise SourceUnavailableError("archive edge unavailable")
+
+
 class FakePublisher:
     def __init__(self, *, current: bool = False) -> None:
         self.current = current
@@ -92,6 +100,51 @@ class FakePublisher:
 
         self.published.extend(artifacts)
         return PublishResult(revision="revision", state=sync_state)
+
+    def invalidate_cache(self) -> None:
+        pass
+
+    def current_revision(self) -> str:
+        return "revision"
+
+    def load_sync_state(self) -> SyncState:
+        return SyncState()
+
+
+class TransientPublisher(FakePublisher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def publish(self, artifacts, quarantines, sync_state, *, commit_message):
+        self.attempts += 1
+        if self.attempts == 1:
+            request = httpx.Request("POST", "https://huggingface.co/api/datasets/commit")
+            raise httpx.ReadTimeout("timed out", request=request)
+        return super().publish(
+            artifacts,
+            quarantines,
+            sync_state,
+            commit_message=commit_message,
+        )
+
+
+class AmbiguousPublisher(FakePublisher):
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts = 0
+
+    def publish(self, artifacts, quarantines, sync_state, *, commit_message):
+        self.attempts += 1
+        self.current = True
+        request = httpx.Request("POST", "https://huggingface.co/api/datasets/commit")
+        raise httpx.ReadTimeout("response lost", request=request)
+
+    def load_sync_state(self) -> SyncState:
+        return SyncState(published_books=1, published_sections=1)
+
+    def current_revision(self) -> str:
+        return "committed-revision"
 
 
 def make_runner(
@@ -265,3 +318,58 @@ def test_prepare_failure_is_visible_in_persistent_state(book: Book, tmp_path) ->
     assert checkpoint is not None
     assert checkpoint.attempt_count == 1
     assert checkpoint.last_error == "RuntimeError: connection lost"
+
+
+def test_resilient_preparation_defers_source_failures(book: Book, tmp_path) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        outcome = make_runner(book, UnavailableArchive(), tmp_path, state).prepare_book_resiliently(
+            book
+        )
+        checkpoint = state.get(book.id)
+
+    assert outcome.error == "SourceUnavailableError: archive edge unavailable"
+    assert checkpoint is not None
+    assert checkpoint.last_error == outcome.error
+
+
+def test_publish_retries_transient_hub_failures(book: Book, tmp_path, monkeypatch) -> None:
+    publisher = TransientPublisher()
+    monkeypatch.setattr("librivox_mirror.workflow.time.sleep", lambda _: None)
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        runner = make_runner(
+            book,
+            PreparedArchive(book, tmp_path),
+            tmp_path,
+            state,
+            publisher=publisher,
+        )
+        outcome = runner.prepare_book(book)
+        result = runner.publish([outcome], SyncState(), commit_message="test")
+
+    assert result is not None
+    assert publisher.attempts == 2
+
+
+def test_publish_recovers_an_ambiguous_success_without_duplicate_commit(
+    book: Book, tmp_path, monkeypatch
+) -> None:
+    publisher = AmbiguousPublisher()
+    monkeypatch.setattr("librivox_mirror.workflow.time.sleep", lambda _: None)
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        runner = make_runner(
+            book,
+            PreparedArchive(book, tmp_path),
+            tmp_path,
+            state,
+            publisher=publisher,
+        )
+        outcome = runner.prepare_book(book)
+        result = runner.publish([outcome], SyncState(), commit_message="test")
+        checkpoint = state.get(book.id)
+
+    assert result is not None
+    assert result.revision == "committed-revision"
+    assert result.state.published_books == 1
+    assert publisher.attempts == 1
+    assert checkpoint is not None
+    assert checkpoint.status == BookStatus.PUBLISHED

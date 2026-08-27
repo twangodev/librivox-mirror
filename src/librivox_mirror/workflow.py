@@ -6,9 +6,14 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from librivox_mirror.archive import InternetArchiveClient, QuarantinedBookError
+from librivox_mirror.archive import (
+    InternetArchiveClient,
+    QuarantinedBookError,
+    SourceUnavailableError,
+)
 from librivox_mirror.artifact import (
     InvalidArtifactError,
+    InvalidAudioError,
     artifact_manifest_path,
     build_artifact,
     load_artifact_manifest,
@@ -19,8 +24,10 @@ from librivox_mirror.artifact import (
 from librivox_mirror.catalog import LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher, PublishResult, QuarantineUpdate
 from librivox_mirror.models import Book, BookArtifact, BookStatus, QuarantineRecord, SyncState
+from librivox_mirror.network import is_transient_http_error
 from librivox_mirror.state import BookCheckpoint, StateStore
 
+PUBLISH_MAX_RETRY_DELAY = 300
 logger = logging.getLogger(__name__)
 
 
@@ -30,6 +37,7 @@ class BookOutcome:
     artifact: BookArtifact | None = None
     quarantine: QuarantineRecord | None = None
     skipped: bool = False
+    error: str | None = None
 
 
 class MirrorRunner:
@@ -61,6 +69,14 @@ class MirrorRunner:
             raise
         logger.info("Finished book %s in %.1fs", book.id, time.monotonic() - started_at)
         return outcome
+
+    def prepare_book_resiliently(self, book: Book) -> BookOutcome:
+        try:
+            return self.prepare_book(book)
+        except (SourceUnavailableError, InvalidAudioError) as error:
+            detail = f"{type(error).__name__}: {error}"
+            logger.error("Deferred book %s after a source failure: %s", book.id, detail)
+            return BookOutcome(book=book, error=detail)
 
     def _prepare_book(self, book: Book, checkpoint: BookCheckpoint) -> BookOutcome:
         if self.publisher and self.publisher.has_current_book(book):
@@ -178,7 +194,7 @@ class MirrorRunner:
         )
         publish_started_at = time.monotonic()
         try:
-            result = self.publisher.publish(
+            result = self._publish_resiliently(
                 artifacts,
                 quarantines,
                 sync_state,
@@ -205,6 +221,50 @@ class MirrorRunner:
             artifact_bytes / 1024**2 / max(publish_seconds, 0.001),
         )
         return result
+
+    def _publish_resiliently(
+        self,
+        artifacts: list[BookArtifact],
+        quarantines: list[QuarantineUpdate],
+        sync_state: SyncState,
+        *,
+        commit_message: str,
+    ) -> PublishResult:
+        if self.publisher is None:
+            raise RuntimeError("cannot publish without a Hub publisher")
+
+        books = [artifact.book for artifact in artifacts]
+        books.extend(update.book for update in quarantines)
+        current_state = sync_state
+        attempt = 1
+        while True:
+            try:
+                if attempt > 1:
+                    self.publisher.invalidate_cache()
+                    if all(self.publisher.has_current_book(book) for book in books):
+                        return PublishResult(
+                            revision=self.publisher.current_revision(),
+                            state=self.publisher.load_sync_state(),
+                        )
+                    current_state = self.publisher.load_sync_state()
+                return self.publisher.publish(
+                    artifacts,
+                    quarantines,
+                    current_state,
+                    commit_message=commit_message,
+                )
+            except Exception as error:
+                if not is_transient_http_error(error):
+                    raise
+                delay = min(2**attempt, PUBLISH_MAX_RETRY_DELAY)
+                logger.warning(
+                    "Retrying Hub publication after attempt %s failed; waiting %ss: %s",
+                    attempt,
+                    delay,
+                    error,
+                )
+                time.sleep(delay)
+                attempt += 1
 
     def cleanup(self, artifact: BookArtifact) -> None:
         self.cleanup_paths(artifact.book.id, artifact.path)

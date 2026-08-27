@@ -444,12 +444,15 @@ def sync(
                 commit_size,
                 final_catalog_watermark=(run_started if len(pending) <= max_books else None),
             )
+    complete_window = len(pending) <= max_books and not any(
+        outcome["status"] == "failed" for outcome in outcomes
+    )
     emit(
         context,
         {
             "outcomes": outcomes,
             "revisions": revisions,
-            "complete_window": len(pending) <= max_books,
+            "complete_window": complete_window,
         },
         f"Synced {len(outcomes)} books",
     )
@@ -561,14 +564,20 @@ def publish_batches(
     revisions: list[str] = []
     current_state = sync_state
     processed_books = 0
+    has_failures = False
     for batch_tuple in batched(books, commit_size):
         batch = list(batch_tuple)
         outcomes = prepare_books(context, runner, batch)
         all_outcomes.extend(outcome_summary(outcome) for outcome in outcomes)
         processed_books += len(batch)
+        has_failures = has_failures or any(outcome.error for outcome in outcomes)
         ids = [book.id for book in batch]
         batch_state = current_state
-        if processed_books == total_books and final_catalog_watermark is not None:
+        if (
+            processed_books == total_books
+            and final_catalog_watermark is not None
+            and not has_failures
+        ):
             batch_state = current_state.model_copy(
                 update={"catalog_watermark": final_catalog_watermark}
             )
@@ -600,7 +609,7 @@ def prepare_books(
         task = progress.add_task("Preparing books", total=len(books))
         for book in books:
             progress.update(task, description=f"Preparing book {book.id}")
-            outcomes.append(runner.prepare_book(book))
+            outcomes.append(runner.prepare_book_resiliently(book))
             progress.advance(task)
     return outcomes
 
@@ -670,7 +679,9 @@ def book_summary(book: Book) -> dict[str, object]:
 
 
 def outcome_summary(outcome: BookOutcome) -> dict[str, object]:
-    if outcome.skipped:
+    if outcome.error:
+        status = "failed"
+    elif outcome.skipped:
         status = "unchanged"
     elif outcome.quarantine:
         status = "quarantined"
@@ -679,6 +690,8 @@ def outcome_summary(outcome: BookOutcome) -> dict[str, object]:
     else:
         status = "unknown"
     payload: dict[str, object] = {"book_id": outcome.book.id, "status": status}
+    if outcome.error:
+        payload["error"] = outcome.error
     if outcome.quarantine:
         payload.update(code=outcome.quarantine.code, detail=outcome.quarantine.detail)
     if outcome.artifact:
@@ -691,6 +704,8 @@ def outcome_summary(outcome: BookOutcome) -> dict[str, object]:
 
 
 def human_outcome(outcome: BookOutcome, revision: str | None) -> str:
+    if outcome.error:
+        return f"Deferred book {outcome.book.id}: {outcome.error}"
     if outcome.skipped:
         return f"Book {outcome.book.id} is already current"
     if outcome.quarantine:
