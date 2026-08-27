@@ -62,6 +62,7 @@ def build_artifact(
         sha256=sha256,
         size=destination.stat().st_size,
         sections=ordered,
+        archive_metadata_json=resolved.archive_metadata_json,
     )
 
 

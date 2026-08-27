@@ -115,6 +115,7 @@ class BookArtifact(MirrorModel):
     sha256: str
     size: int
     sections: tuple[DownloadedSection, ...]
+    archive_metadata_json: str = "{}"
 
 
 class QuarantineCode(StrEnum):
@@ -136,9 +137,12 @@ class QuarantineRecord(MirrorModel):
 
 
 class SyncState(MirrorModel):
+    schema_version: int = 1
     catalog_watermark: int = 0
+    published_books: int = 0
+    published_sections: int = 0
+    quarantined_books: int = 0
     updated_at: datetime | None = None
-    last_commit: str | None = None
 
 
 class BookStatus(StrEnum):
