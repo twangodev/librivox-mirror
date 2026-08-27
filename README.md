@@ -143,7 +143,7 @@ Configure these GitHub settings before enabling scheduled publication:
 - PyPI Trusted Publisher for the `pypi` environment before merging the first
   Release Please release pull request
 
-GitHub Actions and uv are pinned to immutable, cooldown-cleared versions. Renovate
+GitHub Actions and uv are pinned to immutable, cooldown-cleared versions. Dependabot
 keeps the lockfile and Action digests current while applying the same three-day
 minimum release age.
 
