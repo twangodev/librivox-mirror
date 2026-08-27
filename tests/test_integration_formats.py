@@ -6,11 +6,23 @@ import pytest
 
 from librivox_mirror.archive import resolve_original_files
 from librivox_mirror.artifact import build_artifact
+from librivox_mirror.hub import BOOK_SCHEMA, SECTION_SCHEMA
 from librivox_mirror.models import DownloadedSection
 
 datasets = pytest.importorskip("datasets")
 soundfile = pytest.importorskip("soundfile")
 webdataset = pytest.importorskip("webdataset")
+
+
+@pytest.mark.integration
+def test_metadata_schemas_are_native_hugging_face_features() -> None:
+    books = datasets.Features.from_arrow_schema(BOOK_SCHEMA)
+    sections = datasets.Features.from_arrow_schema(SECTION_SCHEMA)
+
+    assert isinstance(books["authors"], datasets.List)
+    assert isinstance(books["librivox_metadata"], datasets.Json)
+    assert isinstance(sections["readers"], datasets.List)
+    assert isinstance(sections["archive_file_metadata"], datasets.Json)
 
 
 @pytest.mark.integration

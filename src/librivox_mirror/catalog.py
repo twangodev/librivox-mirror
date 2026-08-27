@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
-from librivox_mirror.models import Author, Book, Reader, Section, canonical_metadata_json
+from librivox_mirror.models import Author, Book, Genre, Reader, Section, canonical_metadata_json
 
 CATALOG_URL = "https://librivox.org/api/feed/audiobooks"
 
@@ -95,6 +95,8 @@ def parse_book(row: Mapping[str, Any]) -> Book:
     book_id = _required_int(row.get("id"), "book id")
     sections = tuple(parse_section(section, book_id) for section in row.get("sections") or ())
     authors = tuple(parse_author(author) for author in row.get("authors") or ())
+    translators = tuple(parse_author(author) for author in row.get("translators") or ())
+    genres = tuple(parse_genre(genre) for genre in row.get("genres") or ())
     return Book(
         id=book_id,
         title=_text(row.get("title")),
@@ -107,7 +109,11 @@ def parse_book(row: Mapping[str, Any]) -> Book:
         url_project=_optional_text(row.get("url_project")),
         url_rss=_optional_text(row.get("url_rss")),
         url_text_source=_optional_text(row.get("url_text_source")),
+        url_other=_optional_text(row.get("url_other")),
+        url_zip_file=_optional_text(row.get("url_zip_file")),
         authors=authors,
+        translators=translators,
+        genres=genres,
         sections=sections,
         source_metadata_json=canonical_metadata_json(row),
     )
@@ -122,6 +128,7 @@ def parse_section(row: Mapping[str, Any], book_id: int) -> Section:
         title=_text(row.get("title")),
         language=_optional_text(row.get("language")),
         duration_seconds=_optional_int(row.get("playtime")),
+        file_name=_optional_text(row.get("file_name")),
         listen_url=_text(row.get("listen_url")),
         readers=readers,
         source_metadata_json=canonical_metadata_json(row),
@@ -143,6 +150,13 @@ def parse_reader(row: Mapping[str, Any]) -> Reader:
         id=_optional_int(row.get("reader_id") or row.get("id")),
         display_name=_text(row.get("display_name")),
         url_text=_optional_text(row.get("url_text")),
+    )
+
+
+def parse_genre(row: Mapping[str, Any]) -> Genre:
+    return Genre(
+        id=_optional_int(row.get("id")),
+        name=_text(row.get("name")),
     )
 
 

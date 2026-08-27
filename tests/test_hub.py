@@ -160,9 +160,12 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert api.commits[0][1]["parent_commit"] == "parent"
     books = pq.read_table(tmp_path / "hub/metadata/metadata/books/000.parquet").to_pylist()
     sections = pq.read_table(tmp_path / "hub/metadata/metadata/sections/000.parquet").to_pylist()
-    assert books[0]["librivox_metadata_json"] == book.source_metadata_json
-    assert "full_item_metadata" in books[0]["archive_metadata_json"]
-    assert "full_file_metadata" in sections[0]["archive_file_metadata_json"]
+    assert books[0]["librivox_metadata"] == book.source_metadata_json
+    assert books[0]["authors"][0]["last_name"] == "Lovelace"
+    assert sections[0]["readers"][0]["display_name"] == "Reader"
+    assert sections[0]["archive_file_format"] == "VBR MP3"
+    assert "full_item_metadata" in books[0]["archive_metadata"]
+    assert "full_file_metadata" in sections[0]["archive_file_metadata"]
     card = (tmp_path / "hub/metadata/README.md").read_text()
     assert "Last updated (UTC)" in card
     assert "license: cc-by-4.0" in card

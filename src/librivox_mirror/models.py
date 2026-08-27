@@ -27,6 +27,11 @@ class Reader(MirrorModel):
     url_text: str | None = None
 
 
+class Genre(MirrorModel):
+    id: int | None = None
+    name: str
+
+
 class Section(MirrorModel):
     id: int
     book_id: int
@@ -34,6 +39,7 @@ class Section(MirrorModel):
     title: str
     language: str | None = None
     duration_seconds: int | None = None
+    file_name: str | None = None
     listen_url: str
     readers: tuple[Reader, ...] = ()
     source_metadata_json: str = "{}"
@@ -56,7 +62,11 @@ class Book(MirrorModel):
     url_project: str | None = None
     url_rss: str | None = None
     url_text_source: str | None = None
+    url_other: str | None = None
+    url_zip_file: str | None = None
     authors: tuple[Author, ...] = ()
+    translators: tuple[Author, ...] = ()
+    genres: tuple[Genre, ...] = ()
     sections: tuple[Section, ...] = ()
     source_metadata_json: str = "{}"
 

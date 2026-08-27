@@ -31,6 +31,33 @@ from librivox_mirror.models import (
     canonical_metadata_json,
 )
 
+AUTHOR_TYPE = pa.struct(
+    [
+        pa.field("id", pa.int64()),
+        pa.field("first_name", pa.string(), nullable=False),
+        pa.field("last_name", pa.string(), nullable=False),
+        pa.field("dob", pa.string()),
+        pa.field("dod", pa.string()),
+    ]
+)
+
+GENRE_TYPE = pa.struct(
+    [
+        pa.field("id", pa.int64()),
+        pa.field("name", pa.string(), nullable=False),
+    ]
+)
+
+READER_TYPE = pa.struct(
+    [
+        pa.field("id", pa.int64()),
+        pa.field("display_name", pa.string(), nullable=False),
+        pa.field("url_text", pa.string()),
+    ]
+)
+
+JSON_TYPE = pa.json_()
+
 BOOK_SCHEMA = pa.schema(
     [
         pa.field("book_id", pa.int64(), nullable=False),
@@ -41,19 +68,23 @@ BOOK_SCHEMA = pa.schema(
         pa.field("total_time_seconds", pa.int64()),
         pa.field("section_count", pa.int32(), nullable=False),
         pa.field("hash_partition", pa.int16(), nullable=False),
-        pa.field("authors_json", pa.string(), nullable=False),
+        pa.field("authors", pa.list_(AUTHOR_TYPE), nullable=False),
+        pa.field("translators", pa.list_(AUTHOR_TYPE), nullable=False),
+        pa.field("genres", pa.list_(GENRE_TYPE), nullable=False),
         pa.field("url_librivox", pa.string(), nullable=False),
         pa.field("url_iarchive", pa.string(), nullable=False),
         pa.field("url_project", pa.string()),
         pa.field("url_rss", pa.string()),
         pa.field("url_text_source", pa.string()),
+        pa.field("url_other", pa.string()),
+        pa.field("url_zip_file", pa.string()),
         pa.field("archive_identifier", pa.string(), nullable=False),
         pa.field("source_fingerprint", pa.string(), nullable=False),
         pa.field("tar_path", pa.string(), nullable=False),
         pa.field("tar_size", pa.int64(), nullable=False),
         pa.field("tar_sha256", pa.string(), nullable=False),
-        pa.field("librivox_metadata_json", pa.string(), nullable=False),
-        pa.field("archive_metadata_json", pa.string(), nullable=False),
+        pa.field("librivox_metadata", JSON_TYPE, nullable=False),
+        pa.field("archive_metadata", JSON_TYPE, nullable=False),
     ]
 )
 
@@ -65,20 +96,24 @@ SECTION_SCHEMA = pa.schema(
         pa.field("title", pa.string(), nullable=False),
         pa.field("language", pa.string()),
         pa.field("duration_seconds", pa.int64()),
-        pa.field("readers_json", pa.string(), nullable=False),
+        pa.field("readers", pa.list_(READER_TYPE), nullable=False),
         pa.field("hash_partition", pa.int16(), nullable=False),
         pa.field("sample_key", pa.string(), nullable=False),
         pa.field("tar_path", pa.string(), nullable=False),
+        pa.field("librivox_file_name", pa.string()),
         pa.field("librivox_listen_url", pa.string(), nullable=False),
         pa.field("archive_identifier", pa.string(), nullable=False),
         pa.field("archive_file", pa.string(), nullable=False),
+        pa.field("archive_file_format", pa.string()),
+        pa.field("archive_file_source", pa.string()),
+        pa.field("archive_original_file", pa.string()),
         pa.field("source_url", pa.string(), nullable=False),
         pa.field("source_size", pa.int64(), nullable=False),
         pa.field("source_md5", pa.string()),
         pa.field("source_sha1", pa.string()),
         pa.field("mirror_sha256", pa.string(), nullable=False),
-        pa.field("librivox_metadata_json", pa.string(), nullable=False),
-        pa.field("archive_file_metadata_json", pa.string(), nullable=False),
+        pa.field("librivox_metadata", JSON_TYPE, nullable=False),
+        pa.field("archive_file_metadata", JSON_TYPE, nullable=False),
     ]
 )
 
@@ -91,7 +126,7 @@ QUARANTINE_SCHEMA = pa.schema(
         pa.field("archive_identifier", pa.string()),
         pa.field("source_fingerprint", pa.string(), nullable=False),
         pa.field("observed_at", pa.string(), nullable=False),
-        pa.field("librivox_metadata_json", pa.string(), nullable=False),
+        pa.field("librivox_metadata", JSON_TYPE, nullable=False),
     ]
 )
 
@@ -162,18 +197,18 @@ class HubPublisher:
             for path in paths
             if path.startswith("metadata/sections/") and path.endswith(".parquet")
         )
-        sections = [row for path in section_paths for row in self._load_rows(path, SECTION_SCHEMA)]
+        sections = [row for path in section_paths for row in self._load_rows(path)]
         return audio_seconds_by_language(sections)
 
     def has_current_book(self, book: Book) -> bool:
         bucket = book.metadata_bucket
-        books = self._load_rows(metadata_path("books", bucket), BOOK_SCHEMA)
+        books = self._load_rows(metadata_path("books", bucket))
         if any(
             row["book_id"] == book.id and row["source_fingerprint"] == book.source_fingerprint
             for row in books
         ):
             return True
-        quarantined = self._load_rows(metadata_path("quarantine", bucket), QUARANTINE_SCHEMA)
+        quarantined = self._load_rows(metadata_path("quarantine", bucket))
         return any(
             row["book_id"] == book.id and row["source_fingerprint"] == book.source_fingerprint
             for row in quarantined
@@ -279,9 +314,9 @@ class HubPublisher:
         books_path = metadata_path("books", bucket)
         sections_path = metadata_path("sections", bucket)
         quarantine_path = metadata_path("quarantine", bucket)
-        old_books = self._load_rows(books_path, BOOK_SCHEMA)
-        old_sections = self._load_rows(sections_path, SECTION_SCHEMA)
-        old_quarantine = self._load_rows(quarantine_path, QUARANTINE_SCHEMA)
+        old_books = self._load_rows(books_path)
+        old_sections = self._load_rows(sections_path)
+        old_quarantine = self._load_rows(quarantine_path)
         updated_ids = {artifact.book.id for artifact in artifacts}
         updated_ids.update(update.book.id for update in quarantines)
 
@@ -330,11 +365,13 @@ class HubPublisher:
             compression_level=9,
             use_dictionary=True,
             write_statistics=True,
+            write_page_index=True,
             use_content_defined_chunking=True,
+            row_group_size=1000,
         )
         return CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=destination)
 
-    def _load_rows(self, path_in_repo: str, schema: pa.Schema) -> list[dict[str, Any]]:
+    def _load_rows(self, path_in_repo: str) -> list[dict[str, Any]]:
         if path_in_repo in self._rows_cache:
             return [dict(row) for row in self._rows_cache[path_in_repo]]
         try:
@@ -342,7 +379,7 @@ class HubPublisher:
         except MISSING_REMOTE:
             rows: list[dict[str, Any]] = []
         else:
-            rows = pq.read_table(path, schema=schema).to_pylist()
+            rows = pq.read_table(path).to_pylist()
         self._rows_cache[path_in_repo] = rows
         return [dict(row) for row in rows]
 
@@ -402,21 +439,23 @@ def book_row(artifact: BookArtifact) -> dict[str, object]:
         "total_time_seconds": book.total_time_seconds,
         "section_count": len(book.sections),
         "hash_partition": book.hash_partition,
-        "authors_json": canonical_metadata_json(
-            [author.model_dump(mode="json") for author in book.authors]
-        ),
+        "authors": [author.model_dump(mode="json") for author in book.authors],
+        "translators": [translator.model_dump(mode="json") for translator in book.translators],
+        "genres": [genre.model_dump(mode="json") for genre in book.genres],
         "url_librivox": book.url_librivox,
         "url_iarchive": book.url_iarchive,
         "url_project": book.url_project,
         "url_rss": book.url_rss,
         "url_text_source": book.url_text_source,
+        "url_other": book.url_other,
+        "url_zip_file": book.url_zip_file,
         "archive_identifier": artifact.archive_identifier,
         "source_fingerprint": book.source_fingerprint,
         "tar_path": artifact_repo_path(book.id),
         "tar_size": artifact.size,
         "tar_sha256": artifact.sha256,
-        "librivox_metadata_json": book.source_metadata_json,
-        "archive_metadata_json": artifact.archive_metadata_json,
+        "librivox_metadata": book.source_metadata_json,
+        "archive_metadata": artifact.archive_metadata_json,
     }
 
 
@@ -433,15 +472,17 @@ def section_rows(artifact: BookArtifact) -> list[dict[str, object]]:
                 "title": section.title,
                 "language": section.language or artifact.book.language,
                 "duration_seconds": section.duration_seconds,
-                "readers_json": canonical_metadata_json(
-                    [reader.model_dump(mode="json") for reader in section.readers]
-                ),
+                "readers": [reader.model_dump(mode="json") for reader in section.readers],
                 "hash_partition": artifact.book.hash_partition,
                 "sample_key": section.sample_key,
                 "tar_path": artifact_repo_path(artifact.book.id),
+                "librivox_file_name": section.file_name,
                 "librivox_listen_url": section.listen_url,
                 "archive_identifier": artifact.archive_identifier,
                 "archive_file": source.name,
+                "archive_file_format": source.format,
+                "archive_file_source": source.source,
+                "archive_original_file": source.original,
                 "source_url": (
                     "https://archive.org/download/"
                     f"{quote(artifact.archive_identifier, safe='')}/{quote(source.name, safe='/')}"
@@ -450,8 +491,8 @@ def section_rows(artifact: BookArtifact) -> list[dict[str, object]]:
                 "source_md5": source.md5,
                 "source_sha1": source.sha1,
                 "mirror_sha256": download.sha256,
-                "librivox_metadata_json": section.source_metadata_json,
-                "archive_file_metadata_json": source.source_metadata_json,
+                "librivox_metadata": section.source_metadata_json,
+                "archive_file_metadata": source.source_metadata_json,
             }
         )
     return rows
@@ -467,7 +508,7 @@ def quarantine_row(update: QuarantineUpdate) -> dict[str, object]:
         "archive_identifier": record.archive_identifier,
         "source_fingerprint": record.source_fingerprint,
         "observed_at": record.observed_at.isoformat(),
-        "librivox_metadata_json": update.book.source_metadata_json,
+        "librivox_metadata": update.book.source_metadata_json,
     }
 
 

@@ -18,6 +18,8 @@ def catalog_payload() -> dict[str, object]:
                 "totaltimesecs": 12,
                 "url_librivox": "https://librivox.org/a-test-book/",
                 "url_iarchive": "https://archive.org/details/a_test_book",
+                "url_other": "https://example.com/book",
+                "url_zip_file": "https://archive.org/download/a_test_book/book.zip",
                 "future_book_field": {"preserved": True},
                 "authors": [
                     {
@@ -28,6 +30,16 @@ def catalog_payload() -> dict[str, object]:
                         "dod": "1852",
                     }
                 ],
+                "translators": [
+                    {
+                        "id": "3",
+                        "first_name": "Grace",
+                        "last_name": "Hopper",
+                        "dob": "1906",
+                        "dod": "1992",
+                    }
+                ],
+                "genres": [{"id": "9", "name": "Fiction"}],
                 "sections": [
                     {
                         "id": "91",
@@ -35,6 +47,7 @@ def catalog_payload() -> dict[str, object]:
                         "title": "Chapter One",
                         "language": "English",
                         "playtime": "12",
+                        "file_name": "chapter.mp3",
                         "listen_url": ("https://archive.org/download/a_test_book/chapter_64kb.mp3"),
                         "future_section_field": [1, 2, 3],
                         "readers": [{"reader_id": "2", "display_name": "Reader"}],
@@ -55,7 +68,11 @@ def test_get_book_parses_normalized_fields_and_preserves_source_metadata() -> No
     assert route.called
     assert book.id == 47
     assert book.authors[0].last_name == "Lovelace"
+    assert book.translators[0].last_name == "Hopper"
+    assert book.genres[0].name == "Fiction"
+    assert book.url_zip_file == "https://archive.org/download/a_test_book/book.zip"
     assert book.sections[0].duration_seconds == 12
+    assert book.sections[0].file_name == "chapter.mp3"
     assert json.loads(book.source_metadata_json)["future_book_field"] == {"preserved": True}
     assert json.loads(book.sections[0].source_metadata_json)["future_section_field"] == [1, 2, 3]
 

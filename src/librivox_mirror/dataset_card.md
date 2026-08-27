@@ -54,8 +54,8 @@ $audio_by_language
 All audio belongs to the `train` split. Use `language` and `hash_partition` from the
 Parquet indexes to construct stable downstream subsets or evaluation splits.
 
-The `*_metadata_json` columns retain complete source records from LibriVox and
-Internet Archive.
+Typed Parquet columns provide the stable query surface. Source metadata features
+preserve unmodeled LibriVox and Internet Archive fields for provenance.
 
 ## License and attribution
 
