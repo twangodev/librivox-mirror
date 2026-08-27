@@ -115,6 +115,14 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
     assert metadata["pretty_name"] == "LibriVox Mirror"
     assert metadata["language"] == "multilingual"
     assert metadata["license"] == "cc-by-4.0"
+    configs = {config["config_name"]: config for config in metadata["configs"]}
+    assert set(configs) == {"books", "sections"}
+    assert configs["sections"]["default"] is True
+    assert all(
+        data_file["path"].endswith(".parquet")
+        for config in configs.values()
+        for data_file in config["data_files"]
+    )
     assert "Last updated (UTC) | `2026-08-27T18:30:00Z`" in content
     assert "Audio hours | 12.5" in content
     assert "Audio languages | 2" in content

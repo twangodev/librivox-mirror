@@ -3,12 +3,14 @@ import io
 import json
 import warnings
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from librivox_mirror.archive import resolve_original_files
 from librivox_mirror.artifact import build_artifact
-from librivox_mirror.hub import BOOK_SCHEMA, SECTION_SCHEMA
-from librivox_mirror.models import DownloadedSection
+from librivox_mirror.hub import BOOK_SCHEMA, SECTION_SCHEMA, dataset_card
+from librivox_mirror.models import DownloadedSection, SyncState
 
 datasets = pytest.importorskip("datasets")
 soundfile = pytest.importorskip("soundfile")
@@ -24,6 +26,40 @@ def test_metadata_schemas_are_native_hugging_face_features() -> None:
     assert isinstance(books["librivox_metadata"], datasets.Json)
     assert isinstance(sections["readers"], datasets.List)
     assert isinstance(sections["archive_file_metadata"], datasets.Json)
+
+
+@pytest.mark.integration
+def test_dataset_configs_load_parquet_alongside_webdataset(tmp_path) -> None:
+    repository = tmp_path / "repository"
+    (repository / "data/000").mkdir(parents=True)
+    (repository / "metadata/books").mkdir(parents=True)
+    (repository / "metadata/sections").mkdir(parents=True)
+    (repository / "README.md").write_text(dataset_card(SyncState(), "owner/librivox"))
+    (repository / "data/000/000047.tar").write_bytes(b"webdataset shard")
+    pq.write_table(
+        pa.table({"book_id": [47]}),
+        repository / "metadata/books/000.parquet",
+    )
+    pq.write_table(
+        pa.table({"section_id": [91]}),
+        repository / "metadata/sections/000.parquet",
+    )
+
+    sections = datasets.load_dataset(
+        str(repository),
+        "sections",
+        split="train",
+        cache_dir=tmp_path / "sections-cache",
+    )
+    books = datasets.load_dataset(
+        str(repository),
+        "books",
+        split="train",
+        cache_dir=tmp_path / "books-cache",
+    )
+
+    assert sections[0]["section_id"] == 91
+    assert books[0]["book_id"] == 47
 
 
 @pytest.mark.integration
