@@ -171,6 +171,13 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert api.commits[0][1]["parent_commit"] == "parent"
     books = pq.read_table(tmp_path / "hub/metadata/metadata/books/000.parquet").to_pylist()
     sections = pq.read_table(tmp_path / "hub/metadata/metadata/sections/000.parquet").to_pylist()
+    mirror_tar_url = (
+        "https://huggingface.co/datasets/owner/librivox/resolve/main/data/000/000047.tar"
+    )
+    assert next(iter(books[0])) == "mirror_tar_url"
+    assert next(iter(sections[0])) == "mirror_tar_url"
+    assert books[0]["mirror_tar_url"] == mirror_tar_url
+    assert sections[0]["mirror_tar_url"] == mirror_tar_url
     assert books[0]["librivox_metadata"] == book.source_metadata_json
     assert books[0]["authors"][0]["last_name"] == "Lovelace"
     assert sections[0]["readers"][0]["display_name"] == "Reader"

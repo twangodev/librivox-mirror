@@ -60,6 +60,7 @@ JSON_TYPE = pa.json_()
 
 BOOK_SCHEMA = pa.schema(
     [
+        pa.field("mirror_tar_url", pa.string(), nullable=False),
         pa.field("book_id", pa.int64(), nullable=False),
         pa.field("title", pa.string(), nullable=False),
         pa.field("description", pa.string(), nullable=False),
@@ -90,6 +91,7 @@ BOOK_SCHEMA = pa.schema(
 
 SECTION_SCHEMA = pa.schema(
     [
+        pa.field("mirror_tar_url", pa.string(), nullable=False),
         pa.field("book_id", pa.int64(), nullable=False),
         pa.field("section_id", pa.int64(), nullable=False),
         pa.field("section_number", pa.int32(), nullable=False),
@@ -320,12 +322,20 @@ class HubPublisher:
         updated_ids = {artifact.book.id for artifact in artifacts}
         updated_ids.update(update.book.id for update in quarantines)
 
-        books = [row for row in old_books if row["book_id"] not in updated_ids]
-        sections = [row for row in old_sections if row["book_id"] not in updated_ids]
+        books = [
+            {**row, "mirror_tar_url": artifact_url(self.repo_id, row["book_id"])}
+            for row in old_books
+            if row["book_id"] not in updated_ids
+        ]
+        sections = [
+            {**row, "mirror_tar_url": artifact_url(self.repo_id, row["book_id"])}
+            for row in old_sections
+            if row["book_id"] not in updated_ids
+        ]
         quarantine_rows = [row for row in old_quarantine if row["book_id"] not in updated_ids]
         for artifact in artifacts:
-            books.append(book_row(artifact))
-            sections.extend(section_rows(artifact))
+            books.append(book_row(artifact, self.repo_id))
+            sections.extend(section_rows(artifact, self.repo_id))
         quarantine_rows.extend(quarantine_row(update) for update in quarantines)
 
         books.sort(key=lambda row: row["book_id"])
@@ -402,6 +412,12 @@ def artifact_repo_path(book_id: int) -> str:
     return f"data/{book_id // 1000:03d}/{book_id:06d}.tar"
 
 
+def artifact_url(repo_id: str, book_id: int) -> str:
+    repo = quote(repo_id, safe="/")
+    path = quote(artifact_repo_path(book_id), safe="/")
+    return f"https://huggingface.co/datasets/{repo}/resolve/main/{path}"
+
+
 def audio_seconds_by_language(sections: list[dict[str, Any]]) -> dict[str, int]:
     totals: Counter[str] = Counter()
     for section in sections:
@@ -428,9 +444,10 @@ def merge_audio_seconds_by_language(
     return {language: seconds for language, seconds in merged.items() if seconds > 0}
 
 
-def book_row(artifact: BookArtifact) -> dict[str, object]:
+def book_row(artifact: BookArtifact, repo_id: str) -> dict[str, object]:
     book = artifact.book
     return {
+        "mirror_tar_url": artifact_url(repo_id, book.id),
         "book_id": book.id,
         "title": book.title,
         "description": book.description,
@@ -459,13 +476,14 @@ def book_row(artifact: BookArtifact) -> dict[str, object]:
     }
 
 
-def section_rows(artifact: BookArtifact) -> list[dict[str, object]]:
+def section_rows(artifact: BookArtifact, repo_id: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for download in artifact.sections:
         section = download.resolved.section
         source = download.resolved.archive_file
         rows.append(
             {
+                "mirror_tar_url": artifact_url(repo_id, artifact.book.id),
                 "book_id": artifact.book.id,
                 "section_id": section.id,
                 "section_number": section.section_number,
