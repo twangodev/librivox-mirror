@@ -169,6 +169,30 @@ class StateStore:
             raise RuntimeError(f"failed to transition book {book_id}")
         return transitioned
 
+    def restart(self, book_id: int) -> BookCheckpoint:
+        if self.get(book_id) is None:
+            raise KeyError(f"book {book_id} has not been discovered")
+        self._connection.execute(
+            """
+            UPDATE books SET
+                status = ?,
+                archive_identifier = NULL,
+                artifact_path = NULL,
+                artifact_sha256 = NULL,
+                error_code = NULL,
+                error_detail = NULL,
+                published_revision = NULL,
+                updated_at = ?
+            WHERE book_id = ?
+            """,
+            (BookStatus.DISCOVERED, utc_now(), book_id),
+        )
+        self._connection.commit()
+        restarted = self.get(book_id)
+        if restarted is None:
+            raise RuntimeError(f"failed to restart book {book_id}")
+        return restarted
+
     def quarantine(self, record: QuarantineRecord) -> BookCheckpoint:
         self._connection.execute(
             """

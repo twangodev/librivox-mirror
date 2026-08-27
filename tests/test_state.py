@@ -48,3 +48,15 @@ def test_quarantine_is_durable(book: Book, tmp_path) -> None:
 
     assert checkpoint.status == BookStatus.QUARANTINED
     assert checkpoint.error_code == QuarantineCode.ORIGINAL_FILE_MISSING
+
+
+def test_restart_clears_progress_for_safe_replay(book: Book, tmp_path) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        state.discover(book)
+        state.transition(book.id, BookStatus.RESOLVED, archive_identifier="a_test_book")
+
+        checkpoint = state.restart(book.id)
+
+    assert checkpoint.status == BookStatus.DISCOVERED
+    assert checkpoint.archive_identifier is None
+    assert checkpoint.artifact_path is None

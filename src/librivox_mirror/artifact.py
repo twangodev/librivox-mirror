@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import tarfile
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
@@ -29,6 +30,10 @@ def artifact_path(root: Path, book_id: int) -> Path:
     return root / "data" / f"{book_id // 1000:03d}" / f"{book_id:06d}.tar"
 
 
+def artifact_manifest_path(root: Path, book_id: int) -> Path:
+    return root / "manifests" / f"{book_id:06d}.json"
+
+
 def build_artifact(
     resolved: ResolvedBook,
     downloads: Iterable[DownloadedSection],
@@ -53,7 +58,9 @@ def build_artifact(
             add_path(archive, f"{key}.mp3", download.path)
             metadata = section_metadata(resolved, download)
             add_bytes(archive, f"{key}.json", canonical_json(metadata))
+    sync_file(partial)
     partial.replace(destination)
+    sync_directory(destination.parent)
     sha256 = file_sha256(destination)
     return BookArtifact(
         book=resolved.book,
@@ -64,6 +71,33 @@ def build_artifact(
         sections=ordered,
         archive_metadata_json=resolved.archive_metadata_json,
     )
+
+
+def write_artifact_manifest(artifact: BookArtifact, path: Path) -> None:
+    payload = {
+        "schema_version": 1,
+        "artifact": artifact.model_dump(mode="json"),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.with_suffix(".json.partial")
+    partial.write_text(canonical_metadata_json(payload) + "\n", encoding="utf-8")
+    sync_file(partial)
+    partial.replace(path)
+    sync_directory(path.parent)
+
+
+def load_artifact_manifest(path: Path) -> BookArtifact:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload["schema_version"] != 1:
+            raise InvalidArtifactError(
+                f"unsupported artifact manifest schema {payload['schema_version']!r}"
+            )
+        return BookArtifact.model_validate(payload["artifact"])
+    except (KeyError, TypeError, ValueError) as error:
+        if isinstance(error, InvalidArtifactError):
+            raise
+        raise InvalidArtifactError(f"invalid artifact manifest {path}") from error
 
 
 def section_metadata(resolved: ResolvedBook, download: DownloadedSection) -> dict[str, object]:
@@ -158,3 +192,16 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def sync_file(path: Path) -> None:
+    with path.open("rb") as file:
+        os.fsync(file.fileno())
+
+
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
