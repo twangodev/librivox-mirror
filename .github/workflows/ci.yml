@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.12.5
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --python ${{ matrix.python-version }} --group dev --no-group integration
+      - run: uv lock --check
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run ty check
+      - run: uv run pytest --cov=librivox_mirror --cov-report=term-missing
+      - run: uv build --no-sources
+      - run: uv pip install --reinstall --no-deps ./dist/*.whl
+      - run: uv run --no-sync librivox-mirror version
+
+  formats:
+    name: Dataset formats
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.12.5
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --python 3.12 --group dev --group integration
+      - run: uv run pytest -m integration

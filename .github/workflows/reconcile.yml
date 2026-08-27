@@ -1,0 +1,40 @@
+name: Reconcile LibriVox
+
+on:
+  schedule:
+    - cron: "43 9 1 * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: librivox-hub-writes
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: vars.HF_DATASET_REPO != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: 0.12.5
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --no-group dev --no-group integration
+      - name: Reconcile changed books
+        run: >-
+          uv run librivox-mirror reconcile
+          --max-books 20
+          --commit-size 1
+          --jobs 2
+          --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
+          --staging "$RUNNER_TEMP/librivox-mirror/staging"
