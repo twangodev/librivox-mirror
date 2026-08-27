@@ -36,6 +36,7 @@ class Section(MirrorModel):
     duration_seconds: int | None = None
     listen_url: str
     readers: tuple[Reader, ...] = ()
+    source_metadata_json: str = "{}"
 
     @computed_field
     @property
@@ -57,6 +58,7 @@ class Book(MirrorModel):
     url_text_source: str | None = None
     authors: tuple[Author, ...] = ()
     sections: tuple[Section, ...] = ()
+    source_metadata_json: str = "{}"
 
     @computed_field
     @property
@@ -73,7 +75,7 @@ class Book(MirrorModel):
     @property
     def source_fingerprint(self) -> str:
         payload = self.model_dump(mode="json", exclude={"source_fingerprint"})
-        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        encoded = canonical_metadata_json(payload).encode()
         return hashlib.sha256(encoded).hexdigest()
 
 
@@ -85,6 +87,7 @@ class ArchiveFile(MirrorModel):
     format: str | None = None
     source: str | None = None
     original: str | None = None
+    source_metadata_json: str = "{}"
 
 
 class ResolvedSection(MirrorModel):
@@ -96,6 +99,7 @@ class ResolvedBook(MirrorModel):
     book: Book
     archive_identifier: str
     sections: tuple[ResolvedSection, ...]
+    archive_metadata_json: str = "{}"
 
 
 class DownloadedSection(MirrorModel):
@@ -145,3 +149,13 @@ class BookStatus(StrEnum):
     PACKED = "packed"
     PUBLISHED = "published"
     QUARANTINED = "quarantined"
+
+
+def canonical_metadata_json(value: object) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
