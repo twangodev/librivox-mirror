@@ -68,9 +68,9 @@ differ by jurisdiction.
 ## Citation
 
 ```bibtex
-@misc{librivoxmirror2026,
-  author       = {LibriVox Mirror maintainers},
-  title        = {LibriVox Mirror: An ML-Ready Mirror of the LibriVox Catalog},
+@misc{ding2026librivoxmirror,
+  author       = {James Ding},
+  title        = {LibriVox Mirror},
   year         = {2026},
   publisher    = {Hugging Face},
   howpublished = {\url{$repo_url}},

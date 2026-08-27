@@ -122,7 +122,10 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
     assert "| French | 2.5 |" in content
     assert "last_updated-2026--08--27T18%3A30%3A00Z" in content
     assert "logo=creativecommons" in content
-    assert "LibriVox Mirror maintainers" in content
+    assert "@misc{ding2026librivoxmirror" in content
+    assert "author       = {James Ding}" in content
+    assert "title        = {LibriVox Mirror}" in content
+    assert "ML-Ready" not in content
     assert "https://huggingface.co/datasets/owner/librivox" in content
     assert "is not relicensed by this mirror" in content
 
