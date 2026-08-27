@@ -149,7 +149,9 @@ minimum release age.
 
 Conventional Commits drive the Release Please pull request. Merging that pull
 request creates the version tag and GitHub release, then publishes the package to
-PyPI through Trusted Publishing in the same verified workflow run.
+PyPI through Trusted Publishing in the same verified workflow run. The release job
+also refreshes `uv.lock` on the generated pull request so its project version stays
+consistent with `pyproject.toml`.
 
 ## Rights
 
