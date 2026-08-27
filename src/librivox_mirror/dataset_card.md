@@ -32,9 +32,7 @@ configs:
 [![Hugging Face dataset](https://img.shields.io/badge/Hugging_Face-dataset-FFD21E?style=flat-square&logo=huggingface&logoColor=000)]($repo_url)
 ![Last updated](https://img.shields.io/badge/last_updated-$updated_at_badge-0969da?style=flat-square&logo=githubactions&logoColor=white)
 
-An ML-ready, continuously updated mirror of original LibriVox MP3 files. Audio is
-stored as one deterministic WebDataset TAR per book, with compact Parquet indexes
-for book and section metadata.
+ML-ready, continuously updated mirror of the LibriVox catalog.
 
 ## Current snapshot
 
