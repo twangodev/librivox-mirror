@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import warnings
 
 import pytest
 
@@ -60,7 +61,12 @@ def test_artifact_loads_with_datasets_and_webdataset(book, tmp_path) -> None:
         tmp_path / "repository",
     )
 
-    sample = next(iter(webdataset.WebDataset(str(artifact.path), shardshuffle=False)))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="unclosed file", category=ResourceWarning)
+        with webdataset.WebDataset(str(artifact.path), shardshuffle=False) as web_dataset:
+            samples = list(web_dataset)
+    assert len(samples) == 1
+    sample = samples[0]
     assert sample["__key__"] == "000047-00000091"
     assert sample["mp3"] == content
     assert json.loads(sample["json"])["book_id"] == 47

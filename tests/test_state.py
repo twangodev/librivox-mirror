@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -80,7 +81,7 @@ def test_attempt_failure_is_persisted(book: Book, tmp_path) -> None:
 
 def test_existing_state_schema_is_migrated(book: Book, tmp_path) -> None:
     path = tmp_path / "state.sqlite3"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
             """
             CREATE TABLE books (
