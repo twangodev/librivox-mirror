@@ -1,161 +1,72 @@
 # librivox-mirror
 
-`librivox-mirror` builds and maintains an ML-ready Hugging Face mirror of the
-LibriVox catalog. It preserves original MP3 bytes, groups one book per deterministic
-WebDataset TAR, and publishes compact Parquet indexes for discovery.
+Fast, structured, continuously updated LibriVox audio mirror.
 
-The slow initial backfill is designed for dedicated infrastructure. Daily updates
-are small enough to run in GitHub Actions without relying on a long-lived runner.
+Original MP3 bytes are stored in deterministic, one-book WebDataset TARs. Compact
+Parquet indexes make the catalog easy to browse without downloading the audio. The
+initial backfill runs on dedicated infrastructure; GitHub Actions handles updates.
 
 ## Install
-
-Run the published CLI without managing an environment:
 
 ```console
 uvx librivox-mirror --help
 ```
 
-For development, clone the repository and let uv create the locked environment:
+For development:
 
 ```console
 uv sync --locked --group dev --no-group integration
 uv run librivox-mirror --help
 ```
 
-The package supports Python 3.12 through 3.14. Ruff formats and lints the project,
-ty checks types, and pytest runs the test suite. uv excludes every package uploaded
-within the previous three days when refreshing `uv.lock`.
+Python 3.12 through 3.14 is supported.
 
-## Dataset layout
+## Dataset
 
-```text
-data/000/000047.tar
-metadata/books/000.parquet
-metadata/sections/000.parquet
-metadata/quarantine/000.parquet
-state/sync.json
-README.md
-```
-
-Each TAR contains matching `<book_id>-<section_id>.mp3` and `.json` records. TAR
-headers, record ordering, and JSON encoding are normalized, so rebuilding unchanged
-source data produces identical bytes. Original LibriVox audio bytes are never
-transcoded.
-
-The generated Hugging Face dataset exposes three configurations:
+The Hugging Face dataset exposes three configurations:
 
 - `default`: streaming WebDataset audio and sample metadata
-- `books`: one compact Parquet row per book
-- `sections`: one compact Parquet row per section with TAR path and sample key
-
-Common ML fields are normalized for efficient filtering. The complete LibriVox
-book and section records, Internet Archive item metadata, and selected file records
-are retained in `*_metadata_json` columns, including upstream fields unknown to this
-version of the mirror.
+- `books`: one Parquet row per book
+- `sections`: one Parquet row per section
 
 ```python
 from datasets import load_dataset
 
 books = load_dataset("owner/librivox", "books", split="train")
-english = books.filter(lambda row: row["language"] == "English")
-
 audio = load_dataset("owner/librivox", split="train", streaming=True)
-first_sample = next(iter(audio))
 ```
 
-All audio belongs to the `train` split. The `language` and stable
-`hash_partition` columns let downstream users construct their own reproducible
-subsets and evaluation splits.
+Original audio is never transcoded. Complete LibriVox and Internet Archive source
+records are retained alongside normalized fields and checksums.
 
-## CLI
-
-Inspect recent catalog changes without writing state or downloading audio:
+## Usage
 
 ```console
 librivox-mirror plan
-librivox-mirror plan --start-id 40 --end-id 50 --resolve
-```
-
-Mirror one book locally:
-
-```console
 librivox-mirror mirror 47
+librivox-mirror backfill --start-id 1 --end-id 1000 --jobs 4
 ```
 
-Publish it by configuring a dataset repository and token:
+Set `HF_DATASET_REPO` and `HF_TOKEN` to publish instead of only staging locally.
+SQLite under `.librivox-mirror/` stores durable checkpoints, so interrupted backfills
+can resume safely. Run `librivox-mirror --help` for all commands and options.
 
-```console
-export HF_DATASET_REPO=owner/librivox
-export HF_TOKEN=hf_...
-export LIBRIVOX_MIRROR_USER_AGENT="librivox-mirror/0.1 (contact: you@example.com)"
-librivox-mirror mirror 47
-```
+## Automation
 
-Run an explicit backfill range on the dedicated host:
+Configure these GitHub settings before enabling publication:
 
-```console
-librivox-mirror backfill \
-  --start-id 1 \
-  --end-id 1000 \
-  --commit-size 1 \
-  --jobs 4
-```
+- repository variable `HF_DATASET_REPO`
+- repository secret `HF_TOKEN` with dataset write access
+- PyPI Trusted Publisher for the `pypi` environment
 
-SQLite under `.librivox-mirror/` stores durable local checkpoints. Re-running the
-same command resumes verified downloads and skips source fingerprints already on
-the Hub. SQLite is never uploaded; the Parquet indexes and `state/sync.json` are the
-shared source of truth.
+`python.yml` validates Python and manages Release Please. `huggingface.yml` runs the
+daily sync, monthly reconciliation, and manual dataset operations. Dependencies use
+a three-day release cooldown.
 
-`--commit-size` may be raised to 20 when the backfill host has enough staging disk.
-GitHub Actions deliberately uses one book per commit to keep hosted-runner disk
-usage bounded. A TAR and its downloaded MP3s are removed only after the atomic Hub
-commit succeeds.
-
-Every command supports human terminal output, with Rich progress and tracebacks on
-interactive terminals. Put `--json` before the command for stable JSON on stdout;
-logs remain on stderr and terminal colors are automatically disabled in CI and
-pipes.
-
-## Updating and reconciliation
-
-The daily workflow queries LibriVox using the last committed watermark with a
-48-hour overlap. It compares stable source fingerprints against the Hub, publishes
-only changed books, and advances the watermark only after the entire selected
-window succeeds. A no-change run creates no Hub commit.
-
-The monthly workflow walks the catalog and republishes changed fingerprints. A
-book is quarantined as a unit when any section lacks one unambiguous original MP3.
-Quarantine rows preserve the reason and complete LibriVox source record. Transient
-HTTP failures are retried and fail the run instead of being misclassified as source
-problems.
-
-Internet Archive requests use a descriptive User-Agent, bounded concurrency,
-inter-request delay, upstream checksums, exponential retries, and `Retry-After`
-handling. GitHub-hosted IPs are not assumed to be privileged; throttling is treated
-as normal backpressure.
-
-## Repository automation
-
-Configure these GitHub settings before enabling scheduled publication:
-
-- repository variable `HF_DATASET_REPO`, such as `owner/librivox`
-- repository secret `HF_TOKEN` with write access to that dataset
-- PyPI Trusted Publisher for the `pypi` environment before merging the first
-  Release Please release pull request
-
-GitHub Actions and uv are pinned to immutable, cooldown-cleared versions. Dependabot
-keeps the lockfile and Action digests current while applying the same three-day
-minimum release age.
-
-Conventional Commits drive the Release Please pull request. Merging that pull
-request creates the version tag and GitHub release, then publishes the package to
-PyPI through Trusted Publishing in the same verified workflow run. The release job
-also refreshes `uv.lock` on the generated pull request so its project version stays
-consistent with `pyproject.toml`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development checks and conventions.
 
 ## Licenses
 
-The source code is MIT licensed. The copyrightable mirror-specific compilation,
-curation, normalized metadata, indexes, and dataset card are licensed under CC BY
-4.0. Original LibriVox audio is not relicensed and remains public domain in the
-United States. Rules may vary by jurisdiction.
+The code is MIT licensed. Copyrightable mirror-specific curation, indexes, metadata,
+and documentation are CC BY 4.0. Original LibriVox audio is not relicensed and
+remains public domain in the United States. Rules may vary by jurisdiction.
