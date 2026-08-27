@@ -25,9 +25,9 @@ backfills resumable.
 
 ## Dataset
 
-- `audio` (default): streaming WebDataset audio and sample metadata
-- `sections`: one Parquet row per audio section
+- `sections` (default): one Parquet row per audio section
 - `books`: one Parquet row per book
+- `data/`: streaming WebDataset audio and sample metadata
 
 Audio is never transcoded. Complete LibriVox and Internet Archive metadata and
 checksums are preserved.

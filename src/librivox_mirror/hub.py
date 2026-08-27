@@ -90,6 +90,7 @@ BOOK_SCHEMA = pa.schema(
 
 SECTION_SCHEMA = pa.schema(
     [
+        pa.field("mirror_audio_uri", pa.string(), nullable=False),
         pa.field("book_id", pa.int64(), nullable=False),
         pa.field("section_id", pa.int64(), nullable=False),
         pa.field("section_number", pa.int32(), nullable=False),
@@ -321,11 +322,15 @@ class HubPublisher:
         updated_ids.update(update.book.id for update in quarantines)
 
         books = [row for row in old_books if row["book_id"] not in updated_ids]
-        sections = [row for row in old_sections if row["book_id"] not in updated_ids]
+        sections = [
+            with_mirror_audio_uri(row, self.repo_id)
+            for row in old_sections
+            if row["book_id"] not in updated_ids
+        ]
         quarantine_rows = [row for row in old_quarantine if row["book_id"] not in updated_ids]
         for artifact in artifacts:
             books.append(book_row(artifact))
-            sections.extend(section_rows(artifact))
+            sections.extend(section_rows(artifact, self.repo_id))
         quarantine_rows.extend(quarantine_row(update) for update in quarantines)
 
         books.sort(key=lambda row: row["book_id"])
@@ -459,13 +464,18 @@ def book_row(artifact: BookArtifact) -> dict[str, object]:
     }
 
 
-def section_rows(artifact: BookArtifact) -> list[dict[str, object]]:
+def section_rows(artifact: BookArtifact, repo_id: str) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for download in artifact.sections:
         section = download.resolved.section
         source = download.resolved.archive_file
         rows.append(
             {
+                "mirror_audio_uri": mirror_audio_uri(
+                    repo_id,
+                    artifact_repo_path(artifact.book.id),
+                    section.sample_key,
+                ),
                 "book_id": artifact.book.id,
                 "section_id": section.id,
                 "section_number": section.section_number,
@@ -496,6 +506,20 @@ def section_rows(artifact: BookArtifact) -> list[dict[str, object]]:
             }
         )
     return rows
+
+
+def with_mirror_audio_uri(row: dict[str, Any], repo_id: str) -> dict[str, Any]:
+    return {
+        **row,
+        "mirror_audio_uri": mirror_audio_uri(repo_id, row["tar_path"], row["sample_key"]),
+    }
+
+
+def mirror_audio_uri(repo_id: str, tar_path: str, sample_key: str) -> str:
+    member = quote(f"{sample_key}.mp3", safe="")
+    repository = quote(repo_id, safe="/")
+    shard = quote(tar_path, safe="/")
+    return f"tar://{member}::https://huggingface.co/datasets/{repository}/resolve/main/{shard}"
 
 
 def quarantine_row(update: QuarantineUpdate) -> dict[str, object]:

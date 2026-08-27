@@ -115,17 +115,14 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
     assert metadata["pretty_name"] == "LibriVox Mirror"
     assert metadata["language"] == "multilingual"
     assert metadata["license"] == "cc-by-4.0"
-    assert metadata["dataset_info"][0]["config_name"] == "audio"
-    assert metadata["dataset_info"][0]["features"] == [
-        {"name": "mp3", "dtype": "audio"},
-        {"name": "json", "dtype": "json"},
-        {"name": "__key__", "dtype": "string"},
-        {"name": "__url__", "dtype": "string"},
-    ]
     configs = {config["config_name"]: config for config in metadata["configs"]}
-    assert set(configs) == {"audio"}
-    assert configs["audio"]["default"] is True
-    assert configs["audio"]["data_files"] == [{"split": "train", "path": "data/**/*.tar"}]
+    assert set(configs) == {"books", "sections"}
+    assert configs["sections"]["default"] is True
+    assert all(
+        data_file["path"].endswith(".parquet")
+        for config in configs.values()
+        for data_file in config["data_files"]
+    )
     assert "Last updated (UTC) | `2026-08-27T18:30:00Z`" in content
     assert "Audio hours | 12.5" in content
     assert "Audio languages | 2" in content
@@ -177,6 +174,10 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert books[0]["librivox_metadata"] == book.source_metadata_json
     assert books[0]["authors"][0]["last_name"] == "Lovelace"
     assert sections[0]["readers"][0]["display_name"] == "Reader"
+    assert sections[0]["mirror_audio_uri"] == (
+        "tar://000047-00000091.mp3::"
+        "https://huggingface.co/datasets/owner/librivox/resolve/main/data/000/000047.tar"
+    )
     assert sections[0]["archive_file_format"] == "VBR MP3"
     assert "full_item_metadata" in books[0]["archive_metadata"]
     assert "full_file_metadata" in sections[0]["archive_file_metadata"]
