@@ -5,12 +5,27 @@ import pytest
 
 from librivox_mirror.archive import (
     DownloadIntegrityError,
+    InternetArchiveClient,
     QuarantinedBookError,
     archive_identifier,
     resolve_original_files,
     verify_download,
 )
 from librivox_mirror.models import Book, QuarantineCode
+
+
+class StubDownloadClient(InternetArchiveClient):
+    def __init__(self, content: bytes, *, integrity_failures: int = 0) -> None:
+        self.content = content
+        self.integrity_failures = integrity_failures
+        self.attempts = 0
+
+    def _download_once(self, identifier, archive_file, partial):
+        self.attempts += 1
+        partial.write_bytes(self.content)
+        if self.attempts <= self.integrity_failures:
+            raise DownloadIntegrityError("transient checksum mismatch")
+        return hashlib.sha256(self.content).hexdigest()
 
 
 def archive_rows() -> list[dict[str, str]]:
@@ -90,3 +105,27 @@ def test_verify_download_checks_source_hashes(book: Book, tmp_path) -> None:
     path.write_bytes(b"corrupt")
     with pytest.raises(DownloadIntegrityError):
         verify_download(path, resolved.sections[0].archive_file)
+
+
+def test_corrupt_staged_download_is_replaced(book: Book, tmp_path) -> None:
+    resolved = resolve_original_files(book, "a_test_book", archive_rows())
+    client = StubDownloadClient(b"original audio")
+    path = tmp_path / "000047-00000091.mp3"
+    path.write_bytes(b"corrupt")
+
+    downloaded = client.download_section("a_test_book", resolved.sections[0], tmp_path)
+
+    assert downloaded.path.read_bytes() == b"original audio"
+    assert client.attempts == 1
+
+
+def test_download_retries_integrity_failures(book: Book, tmp_path, monkeypatch) -> None:
+    resolved = resolve_original_files(book, "a_test_book", archive_rows())
+    client = StubDownloadClient(b"original audio", integrity_failures=1)
+    monkeypatch.setattr("librivox_mirror.archive.time.sleep", lambda _: None)
+
+    downloaded = client.download_section("a_test_book", resolved.sections[0], tmp_path)
+
+    assert downloaded.path.read_bytes() == b"original audio"
+    assert client.attempts == 2
+    assert not downloaded.path.with_suffix(".mp3.partial").exists()

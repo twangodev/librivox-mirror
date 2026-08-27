@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import threading
 import time
@@ -28,6 +29,7 @@ from librivox_mirror.models import (
 )
 
 ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
+logger = logging.getLogger(__name__)
 
 
 class QuarantinedBookError(Exception):
@@ -136,8 +138,13 @@ class InternetArchiveClient:
     ) -> DownloadedSection:
         path = destination / f"{resolved.section.sample_key}.mp3"
         if path.exists():
-            sha256 = verify_download(path, resolved.archive_file)
-            return DownloadedSection(resolved=resolved, path=path, sha256=sha256)
+            try:
+                sha256 = verify_download(path, resolved.archive_file)
+            except DownloadIntegrityError as error:
+                logger.warning("Replacing corrupt staged download %s: %s", path, error)
+                path.unlink()
+            else:
+                return DownloadedSection(resolved=resolved, path=path, sha256=sha256)
 
         partial = path.with_suffix(".mp3.partial")
         for attempt in range(1, 6):
@@ -145,10 +152,16 @@ class InternetArchiveClient:
                 sha256 = self._download_once(identifier, resolved.archive_file, partial)
                 partial.replace(path)
                 return DownloadedSection(resolved=resolved, path=path, sha256=sha256)
-            except (httpx.TransportError, httpx.HTTPStatusError):
+            except (httpx.TransportError, httpx.HTTPStatusError, DownloadIntegrityError) as error:
                 partial.unlink(missing_ok=True)
                 if attempt == 5:
                     raise
+                logger.warning(
+                    "Retrying %s after attempt %s failed: %s",
+                    resolved.archive_file.name,
+                    attempt,
+                    error,
+                )
                 time.sleep(min(2**attempt, 30))
         raise AssertionError("download retry loop terminated unexpectedly")
 
