@@ -1,7 +1,9 @@
 import sqlite3
 
+import pytest
+
 from librivox_mirror.models import Book, BookStatus, QuarantineCode, QuarantineRecord
-from librivox_mirror.state import StateStore
+from librivox_mirror.state import ActiveRunError, RunLock, StateStore
 
 
 def test_state_persists_progress_across_processes(book: Book, tmp_path) -> None:
@@ -119,3 +121,14 @@ def test_state_uses_full_synchronous_wal_and_checkpoints_on_close(book: Book, tm
     assert synchronous == 2
     assert journal_mode == "wal"
     assert not path.with_name(f"{path.name}-wal").exists()
+
+
+def test_run_lock_prevents_overlapping_writers(tmp_path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+
+    with RunLock(state_path):
+        assert RunLock.inspect(state_path) is not None
+        with pytest.raises(ActiveRunError, match="another mirror run"), RunLock(state_path):
+            pass
+
+    assert RunLock.inspect(state_path) is None

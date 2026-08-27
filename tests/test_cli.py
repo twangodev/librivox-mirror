@@ -7,7 +7,7 @@ from typer.testing import CliRunner
 from librivox_mirror.catalog import CATALOG_URL
 from librivox_mirror.cli import app
 from librivox_mirror.models import BookStatus
-from librivox_mirror.state import StateStore
+from librivox_mirror.state import RunLock, StateStore
 
 runner = CliRunner()
 
@@ -99,3 +99,17 @@ def test_status_does_not_create_a_missing_database(tmp_path) -> None:
     assert result.exit_code == 0
     assert json.loads(result.stdout)["exists"] is False
     assert not state_path.exists()
+
+
+def test_status_reports_the_active_run(book, tmp_path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    with StateStore(state_path) as state:
+        state.discover(book)
+
+    with RunLock(state_path):
+        result = runner.invoke(app, ["--json", "status", "--state", str(state_path)])
+
+    assert result.exit_code == 0
+    active_run = json.loads(result.stdout)["active_run"]
+    assert active_run["pid"] > 0
+    assert active_run["started_at"]

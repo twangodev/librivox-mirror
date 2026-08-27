@@ -18,7 +18,7 @@ from librivox_mirror.artifact import verify_artifact
 from librivox_mirror.catalog import BookNotFoundError, LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher
 from librivox_mirror.models import Book, BookStatus, SyncState, canonical_metadata_json
-from librivox_mirror.state import StateStore
+from librivox_mirror.state import RunLock, StateStore
 from librivox_mirror.workflow import BookOutcome, MirrorRunner
 
 DEFAULT_STATE = Path(".librivox-mirror/state.sqlite3")
@@ -100,15 +100,22 @@ def status(
 ) -> None:
     """Inspect persistent backfill checkpoints and recent problems."""
     counts = {status.value: 0 for status in BookStatus}
+    active_run = RunLock.inspect(state_path)
     if not state_path.exists():
         emit(
             context,
-            {"state": str(state_path), "exists": False, "books": 0, "counts": counts},
+            {
+                "state": str(state_path),
+                "exists": False,
+                "active_run": active_run,
+                "books": 0,
+                "counts": counts,
+            },
             f"No state database at {state_path}",
         )
         return
 
-    with StateStore(state_path) as state:
+    with StateStore(state_path, read_only=True) as state:
         stored_counts = state.counts()
         counts.update({status.value: count for status, count in stored_counts.items()})
         checkpoints = state.list()
@@ -141,6 +148,7 @@ def status(
         "state": str(state_path),
         "exists": True,
         "integrity": "ok",
+        "active_run": active_run,
         "books": len(checkpoints),
         "counts": counts,
         "packed_bytes": packed_bytes,
@@ -152,6 +160,7 @@ def status(
     )
     lines = [
         f"State: {state_path} ({len(checkpoints)} books, integrity ok)",
+        f"Active run: {active_run or 'none'}",
         count_text,
         f"Recoverable packed artifacts: {packed_bytes / 1024**2:.1f} MiB",
     ]
@@ -264,7 +273,7 @@ def mirror(
         if dry_run:
             report_resolution(context, archive, book)
             return
-        with StateStore(state_path) as state:
+        with RunLock(state_path), StateStore(state_path) as state:
             runner = MirrorRunner(
                 catalog=catalog,
                 archive=archive,
@@ -330,6 +339,7 @@ def backfill(
                 user_agent=user_agent,
                 request_delay=request_delay,
             ) as archive,
+            RunLock(state_path),
             StateStore(state_path) as state,
         ):
             runner = MirrorRunner(
@@ -403,6 +413,7 @@ def sync(
                 user_agent=user_agent,
                 request_delay=request_delay,
             ) as archive,
+            RunLock(state_path),
             StateStore(state_path) as state,
         ):
             runner = MirrorRunner(
@@ -479,6 +490,7 @@ def reconcile(
                 user_agent=user_agent,
                 request_delay=request_delay,
             ) as archive,
+            RunLock(state_path),
             StateStore(state_path) as state,
         ):
             runner = MirrorRunner(

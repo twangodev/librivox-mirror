@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import fcntl
+import json
+import os
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TextIO
 
 from librivox_mirror.models import Book, BookStatus, QuarantineRecord
 
@@ -15,6 +19,64 @@ STATUS_ORDER = {
     BookStatus.PACKED: 4,
     BookStatus.PUBLISHED: 5,
 }
+
+
+class ActiveRunError(OSError):
+    pass
+
+
+class RunLock:
+    def __init__(self, state_path: Path) -> None:
+        self.path = state_path.with_name(f"{state_path.name}.lock")
+        self._file: TextIO | None = None
+
+    def __enter__(self) -> RunLock:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        file = self.path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            file.seek(0)
+            owner = file.read().strip() or "unknown process"
+            file.close()
+            raise ActiveRunError(f"another mirror run holds {self.path}: {owner}") from error
+        file.seek(0)
+        file.truncate()
+        json.dump(
+            {"pid": os.getpid(), "started_at": datetime.now(UTC).isoformat()},
+            file,
+            sort_keys=True,
+        )
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+        self._file = file
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if self._file is None:
+            return
+        fcntl.flock(self._file, fcntl.LOCK_UN)
+        self._file.close()
+        self._file = None
+
+    @classmethod
+    def inspect(cls, state_path: Path) -> dict[str, object] | None:
+        path = state_path.with_name(f"{state_path.name}.lock")
+        if not path.exists():
+            return None
+        with path.open(encoding="utf-8") as file:
+            try:
+                fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                try:
+                    owner = json.load(file)
+                except (json.JSONDecodeError, TypeError):
+                    return {"status": "active"}
+                return owner if isinstance(owner, dict) else {"status": "active"}
+            else:
+                fcntl.flock(file, fcntl.LOCK_UN)
+                return None
 
 
 @dataclass(frozen=True)
@@ -35,37 +97,41 @@ class BookCheckpoint:
 
 
 class StateStore:
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
+        if not read_only:
+            path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._connection = sqlite3.connect(path, timeout=30)
+        self._read_only = read_only
+        database = f"{path.resolve().as_uri()}?mode=ro" if read_only else path
+        self._connection = sqlite3.connect(database, timeout=30, uri=read_only)
         self._connection.row_factory = sqlite3.Row
-        self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA synchronous=FULL")
         self._connection.execute("PRAGMA busy_timeout=30000")
-        self._connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS books (
-                book_id INTEGER PRIMARY KEY,
-                source_fingerprint TEXT NOT NULL,
-                status TEXT NOT NULL,
-                archive_identifier TEXT,
-                artifact_path TEXT,
-                artifact_sha256 TEXT,
-                error_code TEXT,
-                error_detail TEXT,
-                published_revision TEXT,
-                attempt_count INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT,
-                last_started_at TEXT,
-                updated_at TEXT NOT NULL
+        if not read_only:
+            self._connection.execute("PRAGMA journal_mode=WAL")
+            self._connection.execute("PRAGMA synchronous=FULL")
+            self._connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS books (
+                    book_id INTEGER PRIMARY KEY,
+                    source_fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    archive_identifier TEXT,
+                    artifact_path TEXT,
+                    artifact_sha256 TEXT,
+                    error_code TEXT,
+                    error_detail TEXT,
+                    published_revision TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    last_started_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
             )
-            """
-        )
-        self._add_column("attempt_count", "INTEGER NOT NULL DEFAULT 0")
-        self._add_column("last_error", "TEXT")
-        self._add_column("last_started_at", "TEXT")
-        self._connection.commit()
+            self._add_column("attempt_count", "INTEGER NOT NULL DEFAULT 0")
+            self._add_column("last_error", "TEXT")
+            self._add_column("last_started_at", "TEXT")
+            self._connection.commit()
         result = self._connection.execute("PRAGMA quick_check").fetchone()
         if result is None or result[0] != "ok":
             self._connection.close()
@@ -73,7 +139,8 @@ class StateStore:
             raise sqlite3.DatabaseError(f"SQLite quick check failed: {detail}")
 
     def close(self) -> None:
-        self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        if not self._read_only:
+            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._connection.close()
 
     def __enter__(self) -> StateStore:
