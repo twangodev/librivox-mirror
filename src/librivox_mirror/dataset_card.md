@@ -11,16 +11,23 @@ tags:
 - public-domain
 - webdataset
 - datasets
+dataset_info:
+- config_name: audio
+  features:
+  - name: mp3
+    dtype: audio
+  - name: json
+    dtype: json
+  - name: __key__
+    dtype: string
+  - name: __url__
+    dtype: string
 configs:
-- config_name: sections
+- config_name: audio
   default: true
   data_files:
   - split: train
-    path: metadata/sections/*.parquet
-- config_name: books
-  data_files:
-  - split: train
-    path: metadata/books/*.parquet
+    path: data/**/*.tar
 ---
 
 # LibriVox Mirror
@@ -48,12 +55,8 @@ $audio_by_language
 
 ## Dataset structure
 
-The Viewer exposes `sections` and `books` as typed Parquet configs. Original audio
-shards remain under `data/` for WebDataset streaming.
-
-`mirror_tar_url` links to the mirrored shard; `sample_key` selects its audio sample.
-`source_url` is the exact Internet Archive file, while `librivox_listen_url` is
-LibriVox's playback link.
+The default `audio` config streams playable MP3 samples from WebDataset shards.
+Typed Parquet indexes remain under `metadata/sections/` and `metadata/books/`.
 
 Use `language` and `hash_partition` to construct stable downstream subsets or
 evaluation splits. Source metadata features preserve unmodeled LibriVox and

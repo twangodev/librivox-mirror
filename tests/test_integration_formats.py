@@ -29,7 +29,7 @@ def test_metadata_schemas_are_native_hugging_face_features() -> None:
 
 
 @pytest.mark.integration
-def test_dataset_configs_load_parquet_alongside_webdataset(tmp_path) -> None:
+def test_parquet_indexes_load_alongside_webdataset(tmp_path) -> None:
     repository = tmp_path / "repository"
     (repository / "data/000").mkdir(parents=True)
     (repository / "metadata/books").mkdir(parents=True)
@@ -46,14 +46,14 @@ def test_dataset_configs_load_parquet_alongside_webdataset(tmp_path) -> None:
     )
 
     sections = datasets.load_dataset(
-        str(repository),
-        "sections",
+        "parquet",
+        data_files={"train": str(repository / "metadata/sections/*.parquet")},
         split="train",
         cache_dir=tmp_path / "sections-cache",
     )
     books = datasets.load_dataset(
-        str(repository),
-        "books",
+        "parquet",
+        data_files={"train": str(repository / "metadata/books/*.parquet")},
         split="train",
         cache_dir=tmp_path / "books-cache",
     )
@@ -96,6 +96,7 @@ def test_artifact_loads_with_datasets_and_webdataset(book, tmp_path) -> None:
         ],
         tmp_path / "repository",
     )
+    (tmp_path / "repository/README.md").write_text(dataset_card(SyncState(), "owner/librivox"))
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message="unclosed file", category=ResourceWarning)
@@ -106,6 +107,16 @@ def test_artifact_loads_with_datasets_and_webdataset(book, tmp_path) -> None:
     assert sample["__key__"] == "000047-00000091"
     assert sample["mp3"] == content
     assert json.loads(sample["json"])["book_id"] == 47
+
+    hub_dataset = datasets.load_dataset(
+        str(tmp_path / "repository"),
+        "audio",
+        split="train",
+        cache_dir=tmp_path / "hub-audio-cache",
+        streaming=True,
+    )
+    assert next(iter(hub_dataset.features)) == "mp3"
+    assert isinstance(hub_dataset.features["mp3"], datasets.Audio)
 
     dataset = datasets.load_dataset(
         "webdataset",

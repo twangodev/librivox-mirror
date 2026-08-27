@@ -115,14 +115,17 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
     assert metadata["pretty_name"] == "LibriVox Mirror"
     assert metadata["language"] == "multilingual"
     assert metadata["license"] == "cc-by-4.0"
+    assert metadata["dataset_info"][0]["config_name"] == "audio"
+    assert metadata["dataset_info"][0]["features"] == [
+        {"name": "mp3", "dtype": "audio"},
+        {"name": "json", "dtype": "json"},
+        {"name": "__key__", "dtype": "string"},
+        {"name": "__url__", "dtype": "string"},
+    ]
     configs = {config["config_name"]: config for config in metadata["configs"]}
-    assert set(configs) == {"books", "sections"}
-    assert configs["sections"]["default"] is True
-    assert all(
-        data_file["path"].endswith(".parquet")
-        for config in configs.values()
-        for data_file in config["data_files"]
-    )
+    assert set(configs) == {"audio"}
+    assert configs["audio"]["default"] is True
+    assert configs["audio"]["data_files"] == [{"split": "train", "path": "data/**/*.tar"}]
     assert "Last updated (UTC) | `2026-08-27T18:30:00Z`" in content
     assert "Audio hours | 12.5" in content
     assert "Audio languages | 2" in content
@@ -171,13 +174,6 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert api.commits[0][1]["parent_commit"] == "parent"
     books = pq.read_table(tmp_path / "hub/metadata/metadata/books/000.parquet").to_pylist()
     sections = pq.read_table(tmp_path / "hub/metadata/metadata/sections/000.parquet").to_pylist()
-    mirror_tar_url = (
-        "https://huggingface.co/datasets/owner/librivox/resolve/main/data/000/000047.tar"
-    )
-    assert next(iter(books[0])) == "mirror_tar_url"
-    assert next(iter(sections[0])) == "mirror_tar_url"
-    assert books[0]["mirror_tar_url"] == mirror_tar_url
-    assert sections[0]["mirror_tar_url"] == mirror_tar_url
     assert books[0]["librivox_metadata"] == book.source_metadata_json
     assert books[0]["authors"][0]["last_name"] == "Lovelace"
     assert sections[0]["readers"][0]["display_name"] == "Reader"
