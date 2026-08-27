@@ -32,7 +32,7 @@ configs:
 [![Hugging Face dataset](https://img.shields.io/badge/Hugging_Face-dataset-FFD21E?style=flat-square&logo=huggingface&logoColor=000)]($repo_url)
 ![Last updated](https://img.shields.io/badge/last_updated-$updated_at_badge-0969da?style=flat-square&logo=githubactions&logoColor=white)
 
-ML-ready, continuously updated mirror of the LibriVox catalog.
+Fast, structured, continuously updated LibriVox audio mirror.
 
 ## Current snapshot
 
