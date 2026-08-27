@@ -6,6 +6,8 @@ from typer.testing import CliRunner
 
 from librivox_mirror.catalog import CATALOG_URL
 from librivox_mirror.cli import app
+from librivox_mirror.models import BookStatus
+from librivox_mirror.state import StateStore
 
 runner = CliRunner()
 
@@ -22,7 +24,7 @@ def test_help_names_the_command() -> None:
 
     assert result.exit_code == 0
     assert "librivox-mirror" in result.stdout
-    for command in ("plan", "mirror", "backfill", "sync", "reconcile", "verify"):
+    for command in ("plan", "mirror", "backfill", "sync", "reconcile", "status", "verify"):
         assert command in result.stdout
     assert "\x1b[" not in result.stdout
 
@@ -69,3 +71,31 @@ def test_invalid_range_is_a_usage_error() -> None:
 
     assert result.exit_code == 2
     assert "start-id" in result.output
+
+
+def test_status_reports_persistent_progress_as_json(book, tmp_path) -> None:
+    state_path = tmp_path / "state.sqlite3"
+    with StateStore(state_path) as state:
+        state.discover(book)
+        state.begin_attempt(book.id)
+        state.transition(book.id, BookStatus.RESOLVED, archive_identifier="a_test_book")
+        state.record_failure(book.id, RuntimeError("connection lost"))
+
+    result = runner.invoke(app, ["--json", "status", "--state", str(state_path)])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["integrity"] == "ok"
+    assert payload["counts"]["resolved"] == 1
+    assert payload["recent_problems"][0]["attempts"] == 1
+    assert "connection lost" in payload["recent_problems"][0]["error"]
+
+
+def test_status_does_not_create_a_missing_database(tmp_path) -> None:
+    state_path = tmp_path / "missing.sqlite3"
+
+    result = runner.invoke(app, ["--json", "status", "--state", str(state_path)])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["exists"] is False
+    assert not state_path.exists()

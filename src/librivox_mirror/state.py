@@ -28,6 +28,9 @@ class BookCheckpoint:
     error_code: str | None
     error_detail: str | None
     published_revision: str | None
+    attempt_count: int
+    last_error: str | None
+    last_started_at: datetime | None
     updated_at: datetime
 
 
@@ -35,10 +38,11 @@ class StateStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        self._connection = sqlite3.connect(path)
+        self._connection = sqlite3.connect(path, timeout=30)
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA journal_mode=WAL")
-        self._connection.execute("PRAGMA synchronous=NORMAL")
+        self._connection.execute("PRAGMA synchronous=FULL")
+        self._connection.execute("PRAGMA busy_timeout=30000")
         self._connection.execute(
             """
             CREATE TABLE IF NOT EXISTS books (
@@ -51,13 +55,25 @@ class StateStore:
                 error_code TEXT,
                 error_detail TEXT,
                 published_revision TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT,
+                last_started_at TEXT,
                 updated_at TEXT NOT NULL
             )
             """
         )
+        self._add_column("attempt_count", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column("last_error", "TEXT")
+        self._add_column("last_started_at", "TEXT")
         self._connection.commit()
+        result = self._connection.execute("PRAGMA quick_check").fetchone()
+        if result is None or result[0] != "ok":
+            self._connection.close()
+            detail = result[0] if result else "no result"
+            raise sqlite3.DatabaseError(f"SQLite quick check failed: {detail}")
 
     def close(self) -> None:
+        self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._connection.close()
 
     def __enter__(self) -> StateStore:
@@ -108,6 +124,18 @@ class StateStore:
                 published_revision = CASE
                     WHEN books.source_fingerprint != excluded.source_fingerprint
                     THEN NULL ELSE books.published_revision
+                END,
+                attempt_count = CASE
+                    WHEN books.source_fingerprint != excluded.source_fingerprint
+                    THEN 0 ELSE books.attempt_count
+                END,
+                last_error = CASE
+                    WHEN books.source_fingerprint != excluded.source_fingerprint
+                    THEN NULL ELSE books.last_error
+                END,
+                last_started_at = CASE
+                    WHEN books.source_fingerprint != excluded.source_fingerprint
+                    THEN NULL ELSE books.last_started_at
                 END,
                 updated_at = CASE
                     WHEN books.source_fingerprint != excluded.source_fingerprint
@@ -169,6 +197,39 @@ class StateStore:
             raise RuntimeError(f"failed to transition book {book_id}")
         return transitioned
 
+    def begin_attempt(self, book_id: int) -> BookCheckpoint:
+        if self.get(book_id) is None:
+            raise KeyError(f"book {book_id} has not been discovered")
+        now = utc_now()
+        self._connection.execute(
+            """
+            UPDATE books SET
+                attempt_count = attempt_count + 1,
+                last_error = NULL,
+                last_started_at = ?,
+                updated_at = ?
+            WHERE book_id = ?
+            """,
+            (now, now, book_id),
+        )
+        self._connection.commit()
+        started = self.get(book_id)
+        if started is None:
+            raise RuntimeError(f"failed to begin attempt for book {book_id}")
+        return started
+
+    def record_failure(self, book_id: int, error: Exception) -> BookCheckpoint:
+        detail = f"{type(error).__name__}: {error}"[:4000]
+        self._connection.execute(
+            "UPDATE books SET last_error = ?, updated_at = ? WHERE book_id = ?",
+            (detail, utc_now(), book_id),
+        )
+        self._connection.commit()
+        failed = self.get(book_id)
+        if failed is None:
+            raise KeyError(f"book {book_id} has not been discovered")
+        return failed
+
     def restart(self, book_id: int) -> BookCheckpoint:
         if self.get(book_id) is None:
             raise KeyError(f"book {book_id} has not been discovered")
@@ -182,6 +243,7 @@ class StateStore:
                 error_code = NULL,
                 error_detail = NULL,
                 published_revision = NULL,
+                last_error = NULL,
                 updated_at = ?
             WHERE book_id = ?
             """,
@@ -209,6 +271,7 @@ class StateStore:
                 error_code = excluded.error_code,
                 error_detail = excluded.error_detail,
                 published_revision = NULL,
+                last_error = NULL,
                 updated_at = excluded.updated_at
             """,
             (
@@ -238,6 +301,19 @@ class StateStore:
             rows = self._connection.execute("SELECT * FROM books ORDER BY book_id").fetchall()
         return tuple(checkpoint(row) for row in rows)
 
+    def counts(self) -> dict[BookStatus, int]:
+        rows = self._connection.execute(
+            "SELECT status, COUNT(*) AS count FROM books GROUP BY status"
+        ).fetchall()
+        return {BookStatus(row["status"]): row["count"] for row in rows}
+
+    def _add_column(self, name: str, definition: str) -> None:
+        columns = {
+            row["name"] for row in self._connection.execute("PRAGMA table_info(books)").fetchall()
+        }
+        if name not in columns:
+            self._connection.execute(f"ALTER TABLE books ADD COLUMN {name} {definition}")
+
 
 def checkpoint(row: sqlite3.Row) -> BookCheckpoint:
     return BookCheckpoint(
@@ -250,6 +326,11 @@ def checkpoint(row: sqlite3.Row) -> BookCheckpoint:
         error_code=row["error_code"],
         error_detail=row["error_detail"],
         published_revision=row["published_revision"],
+        attempt_count=row["attempt_count"],
+        last_error=row["last_error"],
+        last_started_at=(
+            datetime.fromisoformat(row["last_started_at"]) if row["last_started_at"] else None
+        ),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
 

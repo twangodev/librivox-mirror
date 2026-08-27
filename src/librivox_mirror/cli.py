@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, cast
@@ -16,7 +17,7 @@ from librivox_mirror.archive import InternetArchiveClient, QuarantinedBookError
 from librivox_mirror.artifact import verify_artifact
 from librivox_mirror.catalog import BookNotFoundError, LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher
-from librivox_mirror.models import Book, SyncState, canonical_metadata_json
+from librivox_mirror.models import Book, BookStatus, SyncState, canonical_metadata_json
 from librivox_mirror.state import StateStore
 from librivox_mirror.workflow import BookOutcome, MirrorRunner
 
@@ -86,6 +87,80 @@ def root(
 def version(context: typer.Context) -> None:
     """Print the installed package version."""
     emit(context, {"version": __version__}, __version__)
+
+
+@app.command()
+def status(
+    context: typer.Context,
+    state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
+    recent: Annotated[
+        int,
+        typer.Option(min=0, max=100, help="Recent failures and quarantines to include."),
+    ] = 10,
+) -> None:
+    """Inspect persistent backfill checkpoints and recent problems."""
+    counts = {status.value: 0 for status in BookStatus}
+    if not state_path.exists():
+        emit(
+            context,
+            {"state": str(state_path), "exists": False, "books": 0, "counts": counts},
+            f"No state database at {state_path}",
+        )
+        return
+
+    with StateStore(state_path) as state:
+        stored_counts = state.counts()
+        counts.update({status.value: count for status, count in stored_counts.items()})
+        checkpoints = state.list()
+    problems = sorted(
+        (
+            checkpoint
+            for checkpoint in checkpoints
+            if checkpoint.last_error or checkpoint.status == BookStatus.QUARANTINED
+        ),
+        key=lambda checkpoint: checkpoint.updated_at,
+        reverse=True,
+    )[:recent]
+    problem_rows = [
+        {
+            "book_id": checkpoint.book_id,
+            "status": checkpoint.status,
+            "attempts": checkpoint.attempt_count,
+            "error": checkpoint.last_error or f"{checkpoint.error_code}: {checkpoint.error_detail}",
+            "updated_at": checkpoint.updated_at.isoformat(),
+        }
+        for checkpoint in problems
+    ]
+    packed_bytes = 0
+    for checkpoint in checkpoints:
+        if checkpoint.artifact_path is None:
+            continue
+        with suppress(FileNotFoundError):
+            packed_bytes += checkpoint.artifact_path.stat().st_size
+    payload = {
+        "state": str(state_path),
+        "exists": True,
+        "integrity": "ok",
+        "books": len(checkpoints),
+        "counts": counts,
+        "packed_bytes": packed_bytes,
+        "recent_problems": problem_rows,
+    }
+    count_text = (
+        ", ".join(f"{name}={count}" for name, count in counts.items() if count > 0)
+        or "no checkpoints"
+    )
+    lines = [
+        f"State: {state_path} ({len(checkpoints)} books, integrity ok)",
+        count_text,
+        f"Recoverable packed artifacts: {packed_bytes / 1024**2:.1f} MiB",
+    ]
+    if problem_rows:
+        lines.append("Recent problems:")
+        lines.extend(
+            f"  book {row['book_id']} [{row['status']}]: {row['error']}" for row in problem_rows
+        )
+    emit(context, payload, "\n".join(lines))
 
 
 @app.command("plan")

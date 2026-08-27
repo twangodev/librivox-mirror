@@ -1,6 +1,8 @@
 import hashlib
 from typing import cast
 
+import pytest
+
 from librivox_mirror.archive import (
     InternetArchiveClient,
     QuarantinedBookError,
@@ -70,6 +72,11 @@ class QuarantineArchive:
 
     def resolve_book(self, book):
         raise QuarantinedBookError(self.record)
+
+
+class FailingArchive:
+    def resolve_book(self, book):
+        raise RuntimeError("connection lost")
 
 
 class FakePublisher:
@@ -247,3 +254,14 @@ def test_publish_removes_packed_checkpoint_files(book: Book, tmp_path) -> None:
     assert result is not None
     assert not outcome.artifact.path.exists()
     assert not manifest.exists()
+
+
+def test_prepare_failure_is_visible_in_persistent_state(book: Book, tmp_path) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        with pytest.raises(RuntimeError, match="connection lost"):
+            make_runner(book, FailingArchive(), tmp_path, state).prepare_book(book)
+        checkpoint = state.get(book.id)
+
+    assert checkpoint is not None
+    assert checkpoint.attempt_count == 1
+    assert checkpoint.last_error == "RuntimeError: connection lost"

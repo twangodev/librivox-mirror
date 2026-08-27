@@ -1,3 +1,5 @@
+import sqlite3
+
 from librivox_mirror.models import Book, BookStatus, QuarantineCode, QuarantineRecord
 from librivox_mirror.state import StateStore
 
@@ -60,3 +62,60 @@ def test_restart_clears_progress_for_safe_replay(book: Book, tmp_path) -> None:
     assert checkpoint.status == BookStatus.DISCOVERED
     assert checkpoint.archive_identifier is None
     assert checkpoint.artifact_path is None
+
+
+def test_attempt_failure_is_persisted(book: Book, tmp_path) -> None:
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        state.discover(book)
+        state.begin_attempt(book.id)
+
+        checkpoint = state.record_failure(book.id, RuntimeError("connection lost"))
+
+    assert checkpoint.attempt_count == 1
+    assert checkpoint.last_started_at is not None
+    assert checkpoint.last_error == "RuntimeError: connection lost"
+
+
+def test_existing_state_schema_is_migrated(book: Book, tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE books (
+                book_id INTEGER PRIMARY KEY,
+                source_fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL,
+                archive_identifier TEXT,
+                artifact_path TEXT,
+                artifact_sha256 TEXT,
+                error_code TEXT,
+                error_detail TEXT,
+                published_revision TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO books (book_id, source_fingerprint, status, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (book.id, book.source_fingerprint, BookStatus.DISCOVERED, "2026-01-01T00:00:00+00:00"),
+        )
+
+    with StateStore(path) as state:
+        checkpoint = state.get(book.id)
+
+    assert checkpoint is not None
+    assert checkpoint.attempt_count == 0
+    assert checkpoint.last_error is None
+
+
+def test_state_uses_full_synchronous_wal_and_checkpoints_on_close(book: Book, tmp_path) -> None:
+    path = tmp_path / "state.sqlite3"
+    with StateStore(path) as state:
+        state.discover(book)
+        synchronous = state._connection.execute("PRAGMA synchronous").fetchone()[0]
+        journal_mode = state._connection.execute("PRAGMA journal_mode").fetchone()[0]
+
+    assert synchronous == 2
+    assert journal_mode == "wal"
+    assert not path.with_name(f"{path.name}-wal").exists()
