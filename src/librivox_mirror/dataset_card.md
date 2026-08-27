@@ -12,15 +12,7 @@ tags:
 - webdataset
 - datasets
 configs:
-- config_name: sections
-  default: true
-  data_files:
-  - split: train
-    path: metadata/sections/*.parquet
-- config_name: books
-  data_files:
-  - split: train
-    path: metadata/books/*.parquet
+$configs
 ---
 
 # LibriVox Mirror
@@ -48,8 +40,9 @@ $audio_by_language
 
 ## Dataset structure
 
-The Viewer exposes typed `sections` and `books` indexes. Original MP3s remain in
-WebDataset shards under `data/`; each section starts with its exact shard-member URI.
+The default `preview` config contains a bounded set of browser-playable original
+MP3s. Full `sections` and `books` indexes remain typed Parquet; canonical audio is
+streamed from WebDataset shards under `data/`.
 
 Use `language` and `hash_partition` to construct stable downstream subsets or
 evaluation splits. Source metadata features preserve unmodeled LibriVox and

@@ -25,7 +25,8 @@ backfills resumable.
 
 ## Dataset
 
-- `sections` (default): one Parquet row per audio section
+- `preview` (default): browser-playable original MP3 samples
+- `sections`: one Parquet row per audio section
 - `books`: one Parquet row per book
 - `data/`: streaming WebDataset audio and sample metadata
 

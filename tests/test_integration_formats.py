@@ -9,7 +9,7 @@ import pytest
 
 from librivox_mirror.archive import resolve_original_files
 from librivox_mirror.artifact import build_artifact
-from librivox_mirror.hub import BOOK_SCHEMA, SECTION_SCHEMA, dataset_card
+from librivox_mirror.hub import BOOK_SCHEMA, PREVIEW_SCHEMA, SECTION_SCHEMA, dataset_card
 from librivox_mirror.models import DownloadedSection, SyncState
 
 datasets = pytest.importorskip("datasets")
@@ -20,10 +20,12 @@ webdataset = pytest.importorskip("webdataset")
 @pytest.mark.integration
 def test_metadata_schemas_are_native_hugging_face_features() -> None:
     books = datasets.Features.from_arrow_schema(BOOK_SCHEMA)
+    preview = datasets.Features.from_arrow_schema(PREVIEW_SCHEMA)
     sections = datasets.Features.from_arrow_schema(SECTION_SCHEMA)
 
     assert isinstance(books["authors"], datasets.List)
     assert isinstance(books["librivox_metadata"], datasets.Json)
+    assert isinstance(preview["audio"], datasets.Audio)
     assert isinstance(sections["readers"], datasets.List)
     assert isinstance(sections["archive_file_metadata"], datasets.Json)
 
@@ -57,7 +59,6 @@ def test_parquet_indexes_load_alongside_webdataset(tmp_path) -> None:
         split="train",
         cache_dir=tmp_path / "books-cache",
     )
-
     assert sections[0]["section_id"] == 91
     assert books[0]["book_id"] == 47
 

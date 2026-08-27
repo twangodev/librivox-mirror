@@ -116,8 +116,8 @@ def test_dataset_card_documents_snapshot_license_and_citation() -> None:
     assert metadata["language"] == "multilingual"
     assert metadata["license"] == "cc-by-4.0"
     configs = {config["config_name"]: config for config in metadata["configs"]}
-    assert set(configs) == {"books", "sections"}
-    assert configs["sections"]["default"] is True
+    assert set(configs) == {"books", "preview", "sections"}
+    assert configs["preview"]["default"] is True
     assert all(
         data_file["path"].endswith(".parquet")
         for config in configs.values()
@@ -163,8 +163,10 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert paths == {
         "data/000/000047.tar",
         "metadata/books/000.parquet",
+        "metadata/preview/preview.parquet",
         "metadata/sections/000.parquet",
         "metadata/quarantine/000.parquet",
+        "preview/000047-00000091.mp3",
         "state/sync.json",
         "README.md",
     }
@@ -174,13 +176,17 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert books[0]["librivox_metadata"] == book.source_metadata_json
     assert books[0]["authors"][0]["last_name"] == "Lovelace"
     assert sections[0]["readers"][0]["display_name"] == "Reader"
-    assert sections[0]["mirror_audio_uri"] == (
-        "tar://000047-00000091.mp3::"
-        "https://huggingface.co/datasets/owner/librivox/resolve/main/data/000/000047.tar"
-    )
+    assert sections[0]["sample_key"] == "000047-00000091"
     assert sections[0]["archive_file_format"] == "VBR MP3"
     assert "full_item_metadata" in books[0]["archive_metadata"]
     assert "full_file_metadata" in sections[0]["archive_file_metadata"]
+    preview = pq.read_table(tmp_path / "hub/metadata/metadata/preview/preview.parquet")
+    assert preview.column_names[0] == "audio"
+    assert preview.column("audio")[0].as_py() == {
+        "bytes": None,
+        "path": "hf://datasets/owner/librivox@main/preview/000047-00000091.mp3",
+    }
+    assert (tmp_path / "hub/metadata/preview/000047-00000091.mp3").read_bytes()
     card = (tmp_path / "hub/metadata/README.md").read_text()
     assert "Last updated (UTC)" in card
     assert "license: cc-by-4.0" in card
@@ -262,7 +268,13 @@ def test_quarantine_replaces_current_artifact_and_metadata(book: Book, tmp_path)
     assert second.state.quarantined_books == 1
     assert second.state.audio_seconds_by_language == {}
     assert "data/000/000047.tar" not in api.files
+    assert "metadata/preview/preview.parquet" not in api.files
+    assert "preview/000047-00000091.mp3" not in api.files
     quarantine = pq.read_table(
         tmp_path / "hub/metadata/metadata/quarantine/000.parquet"
     ).to_pylist()
     assert quarantine[0]["code"] == "original_file_missing"
+    card = DatasetCard((tmp_path / "hub/metadata/README.md").read_text()).data.to_dict()
+    configs = {config["config_name"]: config for config in card["configs"]}
+    assert set(configs) == {"books", "sections"}
+    assert configs["sections"]["default"] is True

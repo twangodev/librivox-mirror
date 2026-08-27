@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import shutil
+import tarfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -90,7 +93,6 @@ BOOK_SCHEMA = pa.schema(
 
 SECTION_SCHEMA = pa.schema(
     [
-        pa.field("mirror_audio_uri", pa.string(), nullable=False),
         pa.field("book_id", pa.int64(), nullable=False),
         pa.field("section_id", pa.int64(), nullable=False),
         pa.field("section_number", pa.int32(), nullable=False),
@@ -117,6 +119,48 @@ SECTION_SCHEMA = pa.schema(
         pa.field("archive_file_metadata", JSON_TYPE, nullable=False),
     ]
 )
+
+AUDIO_TYPE = pa.struct(
+    [
+        pa.field("bytes", pa.binary()),
+        pa.field("path", pa.string()),
+    ]
+)
+
+
+def huggingface_feature(data_type: pa.DataType) -> dict[str, Any]:
+    if data_type == JSON_TYPE:
+        return {"_type": "Json"}
+    if pa.types.is_list(data_type):
+        return {"feature": huggingface_feature(data_type.value_type), "_type": "List"}
+    if pa.types.is_struct(data_type):
+        return {field.name: huggingface_feature(field.type) for field in data_type}
+    return {"dtype": str(data_type), "_type": "Value"}
+
+
+def with_huggingface_features(
+    schema: pa.Schema,
+    overrides: dict[str, dict[str, Any]],
+) -> pa.Schema:
+    features = {
+        field.name: overrides.get(field.name, huggingface_feature(field.type)) for field in schema
+    }
+    metadata = {
+        **(schema.metadata or {}),
+        b"huggingface": json.dumps(
+            {"info": {"features": features}},
+            separators=(",", ":"),
+        ).encode(),
+    }
+    return schema.with_metadata(metadata)
+
+
+PREVIEW_SCHEMA = with_huggingface_features(
+    pa.schema([pa.field("audio", AUDIO_TYPE), *SECTION_SCHEMA]),
+    {"audio": {"_type": "Audio"}},
+)
+PREVIEW_LIMIT = 32
+PREVIEW_METADATA_PATH = "metadata/preview/preview.parquet"
 
 QUARANTINE_SCHEMA = pa.schema(
     [
@@ -260,11 +304,17 @@ class HubPublisher:
                 }
             )
 
+        preview_additions, preview_deletions, preview_available = self._update_preview(
+            artifacts,
+            quarantines,
+        )
         updated_state = updated_state.model_copy(update={"updated_at": datetime.now(UTC)})
         state_path = self.output_directory / "sync.json"
         state_path.write_text(canonical_metadata_json(updated_state.model_dump(mode="json")) + "\n")
         card_path = self.output_directory / "README.md"
-        card_path.write_text(dataset_card(updated_state, self.repo_id))
+        card_path.write_text(
+            dataset_card(updated_state, self.repo_id, preview_available=preview_available)
+        )
 
         additions = [
             CommitOperationAdd(
@@ -274,6 +324,7 @@ class HubPublisher:
             for artifact in artifacts
         ]
         additions.extend(metadata_additions)
+        additions.extend(preview_additions)
         additions.extend(
             [
                 CommitOperationAdd(path_in_repo="state/sync.json", path_or_fileobj=state_path),
@@ -289,6 +340,7 @@ class HubPublisher:
                 repo_type="dataset",
             )
         ]
+        deletions.extend(preview_deletions)
         parent_commit = self.api.repo_info(self.repo_id, repo_type="dataset").sha
         self.api.preupload_lfs_files(
             self.repo_id,
@@ -322,15 +374,11 @@ class HubPublisher:
         updated_ids.update(update.book.id for update in quarantines)
 
         books = [row for row in old_books if row["book_id"] not in updated_ids]
-        sections = [
-            with_mirror_audio_uri(row, self.repo_id)
-            for row in old_sections
-            if row["book_id"] not in updated_ids
-        ]
+        sections = [row for row in old_sections if row["book_id"] not in updated_ids]
         quarantine_rows = [row for row in old_quarantine if row["book_id"] not in updated_ids]
         for artifact in artifacts:
             books.append(book_row(artifact))
-            sections.extend(section_rows(artifact, self.repo_id))
+            sections.extend(section_rows(artifact))
         quarantine_rows.extend(quarantine_row(update) for update in quarantines)
 
         books.sort(key=lambda row: row["book_id"])
@@ -352,6 +400,65 @@ class HubPublisher:
             audio_seconds_by_language=audio_seconds_delta(old_sections, sections),
         )
         return additions, delta
+
+    def _update_preview(
+        self,
+        artifacts: list[BookArtifact],
+        quarantines: list[QuarantineUpdate],
+    ) -> tuple[list[CommitOperationAdd], list[CommitOperationDelete], bool]:
+        old_rows = self._load_rows(PREVIEW_METADATA_PATH)
+        affected_ids = {artifact.book.id for artifact in artifacts}
+        affected_ids.update(update.book.id for update in quarantines)
+        rows = [row for row in old_rows if row["book_id"] not in affected_ids]
+        audio_additions: list[CommitOperationAdd] = []
+
+        for artifact in sorted(artifacts, key=lambda item: item.book.id):
+            rows_by_key = {row["sample_key"]: row for row in section_rows(artifact)}
+            for download in sorted(
+                artifact.sections,
+                key=lambda item: item.resolved.section.sample_key,
+            ):
+                if len(rows) >= PREVIEW_LIMIT:
+                    break
+                sample_key = download.resolved.section.sample_key
+                rows.append(preview_row(rows_by_key[sample_key], self.repo_id))
+                audio_additions.append(self._preview_audio_addition(artifact, sample_key))
+
+        rows.sort(key=lambda row: row["sample_key"])
+        self._rows_cache[PREVIEW_METADATA_PATH] = rows
+        old_paths = {preview_audio_path(row["sample_key"]) for row in old_rows}
+        new_paths = {preview_audio_path(row["sample_key"]) for row in rows}
+        deletion_paths = old_paths - new_paths
+        if not rows and self.api.file_exists(
+            self.repo_id,
+            PREVIEW_METADATA_PATH,
+            repo_type="dataset",
+        ):
+            deletion_paths.add(PREVIEW_METADATA_PATH)
+        deletions = [CommitOperationDelete(path_in_repo=path) for path in sorted(deletion_paths)]
+        additions = [*audio_additions]
+        if rows:
+            additions.insert(
+                0,
+                self._parquet_addition(PREVIEW_METADATA_PATH, PREVIEW_SCHEMA, rows),
+            )
+        return additions, deletions, bool(rows)
+
+    def _preview_audio_addition(
+        self,
+        artifact: BookArtifact,
+        sample_key: str,
+    ) -> CommitOperationAdd:
+        path_in_repo = preview_audio_path(sample_key)
+        destination = self.output_directory / path_in_repo
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(artifact.path, mode="r:") as archive:
+            source = archive.extractfile(f"{sample_key}.mp3")
+            if source is None:
+                raise ValueError(f"artifact is missing preview audio {sample_key!r}")
+            with source, destination.open("wb") as output:
+                shutil.copyfileobj(source, output)
+        return CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=destination)
 
     def _parquet_addition(
         self,
@@ -464,18 +571,13 @@ def book_row(artifact: BookArtifact) -> dict[str, object]:
     }
 
 
-def section_rows(artifact: BookArtifact, repo_id: str) -> list[dict[str, object]]:
+def section_rows(artifact: BookArtifact) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for download in artifact.sections:
         section = download.resolved.section
         source = download.resolved.archive_file
         rows.append(
             {
-                "mirror_audio_uri": mirror_audio_uri(
-                    repo_id,
-                    artifact_repo_path(artifact.book.id),
-                    section.sample_key,
-                ),
                 "book_id": artifact.book.id,
                 "section_id": section.id,
                 "section_number": section.section_number,
@@ -508,18 +610,23 @@ def section_rows(artifact: BookArtifact, repo_id: str) -> list[dict[str, object]
     return rows
 
 
-def with_mirror_audio_uri(row: dict[str, Any], repo_id: str) -> dict[str, Any]:
+def preview_row(section: dict[str, Any], repo_id: str) -> dict[str, Any]:
     return {
-        **row,
-        "mirror_audio_uri": mirror_audio_uri(repo_id, row["tar_path"], row["sample_key"]),
+        "audio": {
+            "bytes": None,
+            "path": preview_audio_uri(repo_id, section["sample_key"]),
+        },
+        **section,
     }
 
 
-def mirror_audio_uri(repo_id: str, tar_path: str, sample_key: str) -> str:
-    member = quote(f"{sample_key}.mp3", safe="")
+def preview_audio_path(sample_key: str) -> str:
+    return f"preview/{quote(sample_key, safe='')}.mp3"
+
+
+def preview_audio_uri(repo_id: str, sample_key: str) -> str:
     repository = quote(repo_id, safe="/")
-    shard = quote(tar_path, safe="/")
-    return f"tar://{member}::https://huggingface.co/datasets/{repository}/resolve/main/{shard}"
+    return f"hf://datasets/{repository}@main/{preview_audio_path(sample_key)}"
 
 
 def quarantine_row(update: QuarantineUpdate) -> dict[str, object]:
@@ -536,13 +643,19 @@ def quarantine_row(update: QuarantineUpdate) -> dict[str, object]:
     }
 
 
-def dataset_card(state: SyncState, repo_id: str) -> str:
+def dataset_card(
+    state: SyncState,
+    repo_id: str,
+    *,
+    preview_available: bool | None = None,
+) -> str:
     updated_at = (
         state.updated_at.isoformat().replace("+00:00", "Z") if state.updated_at else "not yet"
     )
     repo_url = f"https://huggingface.co/datasets/{quote(repo_id, safe='/')}"
     updated_at_badge = quote(updated_at.replace("-", "--"), safe="")
     total_audio_seconds = sum(state.audio_seconds_by_language.values())
+    has_preview = state.published_sections > 0 if preview_available is None else preview_available
     return _DATASET_CARD_TEMPLATE.substitute(
         repo_url=repo_url,
         updated_at=updated_at,
@@ -553,7 +666,36 @@ def dataset_card(state: SyncState, repo_id: str) -> str:
         audio_hours=format_audio_hours(total_audio_seconds),
         audio_languages=f"{len(state.audio_seconds_by_language):,}",
         audio_by_language=audio_by_language_table(state.audio_seconds_by_language),
+        configs=dataset_configs(has_preview),
     )
+
+
+def dataset_configs(has_preview: bool) -> str:
+    configs = []
+    if has_preview:
+        configs.extend(
+            [
+                "- config_name: preview",
+                "  default: true",
+                "  data_files:",
+                "  - split: train",
+                "    path: metadata/preview/*.parquet",
+            ]
+        )
+    configs.extend(
+        [
+            "- config_name: sections",
+            *([] if has_preview else ["  default: true"]),
+            "  data_files:",
+            "  - split: train",
+            "    path: metadata/sections/*.parquet",
+            "- config_name: books",
+            "  data_files:",
+            "  - split: train",
+            "    path: metadata/books/*.parquet",
+        ]
+    )
+    return "\n".join(configs)
 
 
 def audio_by_language_table(audio_seconds: dict[str, int]) -> str:
