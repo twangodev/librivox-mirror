@@ -295,6 +295,7 @@ def sync(
     jobs: Annotated[int, typer.Option(min=1, max=2)] = 2,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     max_books: Annotated[int, typer.Option(min=1, max=20)] = 20,
+    commit_size: Annotated[int, typer.Option(min=1, max=20)] = 1,
     dry_run: Annotated[bool, typer.Option()] = False,
     user_agent: Annotated[
         str,
@@ -322,9 +323,6 @@ def sync(
                 f"{'Would sync' if dry_run else 'Found'} {len(selected)} pending books",
             )
             return
-        next_state = remote_state
-        if len(pending) <= max_books:
-            next_state = remote_state.model_copy(update={"catalog_watermark": run_started})
         with (
             InternetArchiveClient(
                 user_agent=user_agent,
@@ -340,17 +338,19 @@ def sync(
                 jobs=jobs,
                 publisher=publisher,
             )
-            outcomes = prepare_books(context, runner, selected)
-            result = runner.publish(
-                outcomes,
-                next_state,
-                commit_message=f"feat(data): sync {len(outcomes)} LibriVox books",
+            outcomes, revisions = publish_batches(
+                context,
+                runner,
+                selected,
+                remote_state,
+                commit_size,
+                final_catalog_watermark=(run_started if len(pending) <= max_books else None),
             )
     emit(
         context,
         {
             "outcomes": [outcome_summary(item) for item in outcomes],
-            "revision": result.revision if result else None,
+            "revisions": revisions,
             "complete_window": len(pending) <= max_books,
         },
         f"Synced {len(outcomes)} books",
@@ -375,6 +375,7 @@ def reconcile(
     jobs: Annotated[int, typer.Option(min=1, max=4)] = 4,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     max_books: Annotated[int, typer.Option(min=1, max=20)] = 20,
+    commit_size: Annotated[int, typer.Option(min=1, max=20)] = 1,
     dry_run: Annotated[bool, typer.Option()] = False,
     user_agent: Annotated[
         str,
@@ -413,17 +414,18 @@ def reconcile(
                 jobs=jobs,
                 publisher=publisher,
             )
-            outcomes = prepare_books(context, runner, pending)
-            result = runner.publish(
-                outcomes,
+            outcomes, revisions = publish_batches(
+                context,
+                runner,
+                pending,
                 publisher.load_sync_state(),
-                commit_message=f"feat(data): reconcile {len(outcomes)} LibriVox books",
+                commit_size,
             )
     emit(
         context,
         {
             "outcomes": [outcome_summary(item) for item in outcomes],
-            "revision": result.revision if result else None,
+            "revisions": revisions,
         },
         f"Reconciled {len(outcomes)} books",
     )
@@ -450,6 +452,7 @@ def publish_batches(
     books: list[Book],
     sync_state: SyncState,
     commit_size: int,
+    final_catalog_watermark: int | None = None,
 ) -> tuple[list[BookOutcome], list[str]]:
     all_outcomes: list[BookOutcome] = []
     revisions: list[str] = []
@@ -459,9 +462,14 @@ def publish_batches(
         outcomes = prepare_books(context, runner, batch)
         all_outcomes.extend(outcomes)
         ids = [book.id for book in batch]
+        batch_state = current_state
+        if index + commit_size >= len(books) and final_catalog_watermark is not None:
+            batch_state = current_state.model_copy(
+                update={"catalog_watermark": final_catalog_watermark}
+            )
         result = runner.publish(
             outcomes,
-            current_state,
+            batch_state,
             commit_message=f"feat(data): mirror LibriVox books {min(ids)}-{max(ids)}",
         )
         if result:
