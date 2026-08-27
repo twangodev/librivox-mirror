@@ -153,8 +153,11 @@ PyPI through Trusted Publishing in the same verified workflow run. The release j
 also refreshes `uv.lock` on the generated pull request so its project version stays
 consistent with `pyproject.toml`.
 
-## Rights
+## Licenses
 
-The code is MIT licensed. LibriVox states that its recordings are in the public
-domain in the United States. Copyright and public-domain rules vary by jurisdiction;
-dataset users are responsible for checking the rules that apply to them.
+The source code is MIT licensed. The copyrightable mirror-specific compilation,
+curation, normalized metadata, indexes, and dataset card are licensed by James Ding
+under CC BY 4.0 and should be attributed accordingly. Original LibriVox audio is not
+relicensed: LibriVox states that its recordings are in the public domain in the
+United States. Copyright and public-domain rules vary by jurisdiction; dataset users
+are responsible for checking the rules that apply to them.

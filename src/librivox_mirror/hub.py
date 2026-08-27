@@ -200,7 +200,7 @@ class HubPublisher:
         state_path = self.output_directory / "sync.json"
         state_path.write_text(canonical_metadata_json(updated_state.model_dump(mode="json")) + "\n")
         card_path = self.output_directory / "README.md"
-        card_path.write_text(dataset_card(updated_state))
+        card_path.write_text(dataset_card(updated_state, self.repo_id))
 
         additions = [
             CommitOperationAdd(
@@ -416,16 +416,21 @@ def quarantine_row(update: QuarantineUpdate) -> dict[str, object]:
     }
 
 
-def dataset_card(state: SyncState) -> str:
-    updated_at = state.updated_at.isoformat() if state.updated_at else "not yet"
+def dataset_card(state: SyncState, repo_id: str) -> str:
+    updated_at = (
+        state.updated_at.isoformat().replace("+00:00", "Z") if state.updated_at else "not yet"
+    )
     return f"""---
-license: other
+pretty_name: LibriVox Mirror
+language: multilingual
+license: cc-by-4.0
 task_categories:
 - automatic-speech-recognition
 - text-to-speech
 tags:
 - audio
 - librivox
+- public-domain
 - webdataset
 - datasets
 configs:
@@ -445,16 +450,24 @@ configs:
 
 # LibriVox Mirror
 
-An ML-ready, continuously updated mirror of original LibriVox MP3 files. Audio is
-stored as one deterministic WebDataset TAR per book. Compact Parquet indexes expose
-book and section metadata without duplicating the audio.
+An ML-ready, continuously updated mirror of the LibriVox catalog, maintained by
+James Ding. Original MP3 bytes are stored as one deterministic WebDataset TAR per
+book. Compact Parquet indexes expose book and section metadata without duplicating
+the audio.
 
 ## Current snapshot
 
-- Published books: {state.published_books:,}
-- Published sections: {state.published_sections:,}
-- Quarantined books: {state.quarantined_books:,}
-- Generated: {updated_at}
+| Metric | Value |
+| --- | ---: |
+| Published books | {state.published_books:,} |
+| Published sections | {state.published_sections:,} |
+| Quarantined books | {state.quarantined_books:,} |
+| Last updated (UTC) | `{updated_at}` |
+
+The timestamp records the most recent successful dataset commit. No-change update
+runs do not rewrite the card.
+
+## Dataset structure
 
 All audio belongs to the `train` split. Use `language` and `hash_partition` from the
 Parquet indexes to construct stable downstream subsets or evaluation splits.
@@ -463,11 +476,42 @@ The normalized columns cover common ML queries. The `*_metadata_json` columns re
 the complete source records from LibriVox and Internet Archive, including fields not
 currently understood by the mirror.
 
-## Provenance and rights
+## License and attribution
 
-LibriVox states that its recordings are in the public domain in the United States.
-Copyright and public-domain rules differ by jurisdiction; downstream users are
-responsible for checking the rules that apply to them. Metadata links each sample to
-its LibriVox project and exact Internet Archive source file, with upstream and mirror
-checksums preserved.
+The copyrightable mirror-specific compilation, curation, normalized metadata,
+indexes, and documentation are made available by James Ding under the [Creative
+Commons Attribution 4.0 International license](https://creativecommons.org/licenses/by/4.0/).
+When using those parts of the dataset, provide attribution to James Ding and cite
+this dataset.
+
+Suggested attribution:
+
+> LibriVox Mirror by James Ding, licensed under CC BY 4.0. Original LibriVox audio
+> is public domain in the United States and is not relicensed by the mirror.
+
+The CC BY 4.0 license does not apply to elements already in the public domain and
+does not impose new restrictions on them. LibriVox states that its recordings are
+in the public domain in the United States. Copyright and public-domain rules differ
+by jurisdiction; downstream users are responsible for checking the rules that
+apply to them.
+
+## Citation
+
+```bibtex
+@misc{{ding2026librivoxmirror,
+  author       = {{Ding, James}},
+  title        = {{LibriVox Mirror: An ML-Ready Mirror of the LibriVox Catalog}},
+  year         = {{2026}},
+  publisher    = {{Hugging Face}},
+  howpublished = {{\\url{{https://huggingface.co/datasets/{repo_id}}}}},
+  note         = {{Continuously updated dataset}}
+}}
+```
+
+## Provenance and integrity
+
+Metadata links each sample to its LibriVox project and exact Internet Archive source
+file. Upstream checksums and a mirror SHA-256 are preserved. Original audio bytes are
+not transcoded. Please also credit the LibriVox readers and source works when
+appropriate.
 """

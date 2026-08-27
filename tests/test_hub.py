@@ -1,14 +1,15 @@
 import hashlib
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import cast
 
 import httpx
 import pyarrow.parquet as pq
-from huggingface_hub import HfApi
+from huggingface_hub import DatasetCard, HfApi
 
 from librivox_mirror.archive import resolve_original_files
 from librivox_mirror.artifact import build_artifact
-from librivox_mirror.hub import HubPublisher, QuarantineUpdate
+from librivox_mirror.hub import HubPublisher, QuarantineUpdate, dataset_card
 from librivox_mirror.models import (
     Book,
     DownloadedSection,
@@ -95,6 +96,27 @@ def make_artifact(book: Book, tmp_path):
     return build_artifact(resolved, [download], tmp_path / "repository")
 
 
+def test_dataset_card_documents_snapshot_license_and_citation() -> None:
+    content = dataset_card(
+        SyncState(
+            published_books=12,
+            published_sections=345,
+            quarantined_books=6,
+            updated_at=datetime(2026, 8, 27, 18, 30, tzinfo=UTC),
+        ),
+        "owner/librivox",
+    )
+    metadata = DatasetCard(content).data.to_dict()
+
+    assert metadata["pretty_name"] == "LibriVox Mirror"
+    assert metadata["language"] == "multilingual"
+    assert metadata["license"] == "cc-by-4.0"
+    assert "Last updated (UTC) | `2026-08-27T18:30:00Z`" in content
+    assert "Ding, James" in content
+    assert "https://huggingface.co/datasets/owner/librivox" in content
+    assert "does not impose new restrictions" in content
+
+
 def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     api = FakeApi()
     publisher = MissingRemotePublisher(
@@ -130,6 +152,9 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
     assert books[0]["librivox_metadata_json"] == book.source_metadata_json
     assert "full_item_metadata" in books[0]["archive_metadata_json"]
     assert "full_file_metadata" in sections[0]["archive_file_metadata_json"]
+    card = (tmp_path / "hub/metadata/README.md").read_text()
+    assert "Last updated (UTC)" in card
+    assert "license: cc-by-4.0" in card
     assert publisher.has_current_book(book)
 
 
