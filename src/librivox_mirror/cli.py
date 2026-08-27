@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Iterable, Sequence, Sized
 from contextlib import suppress
 from dataclasses import dataclass
+from itertools import batched, islice
 from pathlib import Path
 from typing import Annotated, cast
 
@@ -19,6 +21,7 @@ from librivox_mirror.catalog import BookNotFoundError, LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher
 from librivox_mirror.models import Book, BookStatus, SyncState, canonical_metadata_json
 from librivox_mirror.state import RunLock, StateStore
+from librivox_mirror.streaming import prefetch
 from librivox_mirror.workflow import BookOutcome, MirrorRunner
 
 DEFAULT_STATE = Path(".librivox-mirror/state.sqlite3")
@@ -27,6 +30,7 @@ DEFAULT_USER_AGENT = (
     f"librivox-mirror/{__version__} "
     "(ML dataset mirroring; https://pypi.org/project/librivox-mirror/)"
 )
+logger = logging.getLogger(__name__)
 
 app = typer.Typer(
     name="librivox-mirror",
@@ -324,14 +328,15 @@ def backfill(
     validate_range(start_id, end_id)
     publisher = HubPublisher(repo, token=token, working_directory=staging / "hub")
     with LibriVoxCatalog(user_agent=user_agent) as catalog:
-        books = list(catalog.iter_books(start_id=start_id, end_id=end_id))
+        books: Iterable[Book] = catalog.iter_books(start_id=start_id, end_id=end_id)
         if max_books is not None:
-            books = books[:max_books]
+            books = islice(books, max_books)
         if dry_run:
+            selected = list(books)
             emit(
                 context,
-                {"books": [book_summary(book) for book in books], "count": len(books)},
-                f"Would backfill {len(books)} books",
+                {"books": [book_summary(book) for book in selected], "count": len(selected)},
+                f"Would backfill {len(selected)} books",
             )
             return
         with (
@@ -350,16 +355,23 @@ def backfill(
                 jobs=jobs,
                 publisher=publisher,
             )
-            outcomes, revisions = publish_batches(
-                context,
-                runner,
-                books,
-                publisher.load_sync_state(),
+            logger.info(
+                "Streaming LibriVox catalog books %s-%s into %s-book commits",
+                start_id,
+                end_id,
                 commit_size,
             )
+            with prefetch(catalog_progress(books), capacity=max(50, commit_size * 2)) as queued:
+                outcomes, revisions = publish_batches(
+                    context,
+                    runner,
+                    queued,
+                    publisher.load_sync_state(),
+                    commit_size,
+                )
     emit(
         context,
-        {"outcomes": [outcome_summary(item) for item in outcomes], "revisions": revisions},
+        {"outcomes": outcomes, "revisions": revisions},
         f"Processed {len(outcomes)} books in {len(revisions)} Hub commits",
     )
 
@@ -435,7 +447,7 @@ def sync(
     emit(
         context,
         {
-            "outcomes": [outcome_summary(item) for item in outcomes],
+            "outcomes": outcomes,
             "revisions": revisions,
             "complete_window": len(pending) <= max_books,
         },
@@ -511,7 +523,7 @@ def reconcile(
     emit(
         context,
         {
-            "outcomes": [outcome_summary(item) for item in outcomes],
+            "outcomes": outcomes,
             "revisions": revisions,
         },
         f"Reconciled {len(outcomes)} books",
@@ -536,21 +548,27 @@ def verify(
 def publish_batches(
     context: typer.Context,
     runner: MirrorRunner,
-    books: list[Book],
+    books: Iterable[Book],
     sync_state: SyncState,
     commit_size: int,
     final_catalog_watermark: int | None = None,
-) -> tuple[list[BookOutcome], list[str]]:
-    all_outcomes: list[BookOutcome] = []
+) -> tuple[list[dict[str, object]], list[str]]:
+    if final_catalog_watermark is not None and not isinstance(books, Sized):
+        raise ValueError("a final catalog watermark requires a sized book collection")
+
+    total_books = len(books) if isinstance(books, Sized) else None
+    all_outcomes: list[dict[str, object]] = []
     revisions: list[str] = []
     current_state = sync_state
-    for index in range(0, len(books), commit_size):
-        batch = books[index : index + commit_size]
+    processed_books = 0
+    for batch_tuple in batched(books, commit_size):
+        batch = list(batch_tuple)
         outcomes = prepare_books(context, runner, batch)
-        all_outcomes.extend(outcomes)
+        all_outcomes.extend(outcome_summary(outcome) for outcome in outcomes)
+        processed_books += len(batch)
         ids = [book.id for book in batch]
         batch_state = current_state
-        if index + commit_size >= len(books) and final_catalog_watermark is not None:
+        if processed_books == total_books and final_catalog_watermark is not None:
             batch_state = current_state.model_copy(
                 update={"catalog_watermark": final_catalog_watermark}
             )
@@ -568,7 +586,7 @@ def publish_batches(
 def prepare_books(
     context: typer.Context,
     runner: MirrorRunner,
-    books: list[Book],
+    books: Sequence[Book],
 ) -> list[BookOutcome]:
     settings = app_settings(context)
     outcomes = []
@@ -585,6 +603,15 @@ def prepare_books(
             outcomes.append(runner.prepare_book(book))
             progress.advance(task)
     return outcomes
+
+
+def catalog_progress(books: Iterable[Book]) -> Iterable[Book]:
+    count = 0
+    for count, book in enumerate(books, start=1):
+        if count == 1 or count % 1000 == 0:
+            logger.info("Queued %s LibriVox catalog books", count)
+        yield book
+    logger.info("Finished catalog scan with %s books", count)
 
 
 def report_resolution(
