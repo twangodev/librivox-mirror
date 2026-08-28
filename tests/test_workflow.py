@@ -9,6 +9,7 @@ from librivox_mirror.archive import (
     QuarantinedBookError,
     resolve_original_files,
 )
+from librivox_mirror.capacity import StagingCapacity
 from librivox_mirror.catalog import LibriVoxCatalog
 from librivox_mirror.models import (
     Book,
@@ -156,6 +157,7 @@ def make_runner(
     state: StateStore,
     *,
     publisher=None,
+    staging_capacity=None,
 ) -> MirrorRunner:
     return MirrorRunner(
         catalog=cast(LibriVoxCatalog, None),
@@ -164,6 +166,7 @@ def make_runner(
         staging_directory=tmp_path / "staging",
         jobs=2,
         publisher=publisher,
+        staging_capacity=staging_capacity,
     )
 
 
@@ -309,6 +312,31 @@ def test_publish_removes_packed_checkpoint_files(book: Book, tmp_path) -> None:
     assert result is not None
     assert not outcome.artifact.path.exists()
     assert not manifest.exists()
+
+
+def test_publish_releases_packed_staging_capacity(book: Book, tmp_path) -> None:
+    publisher = FakePublisher()
+    capacity = StagingCapacity(
+        tmp_path / "staging",
+        max_bytes=1024**2,
+        minimum_free_bytes=0,
+    )
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        runner = make_runner(
+            book,
+            PreparedArchive(book, tmp_path),
+            tmp_path,
+            state,
+            publisher=publisher,
+            staging_capacity=capacity,
+        )
+        outcome = runner.prepare_book(book)
+        assert outcome.artifact is not None
+        assert capacity.reserved_bytes == outcome.artifact.size
+
+        runner.publish([outcome], SyncState(), commit_message="test")
+
+    assert capacity.reserved_bytes == 0
 
 
 def test_prepare_failure_is_visible_in_persistent_state(book: Book, tmp_path) -> None:

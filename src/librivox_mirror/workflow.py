@@ -22,6 +22,7 @@ from librivox_mirror.artifact import (
     verify_mp3,
     write_artifact_manifest,
 )
+from librivox_mirror.capacity import StagingCapacity
 from librivox_mirror.catalog import LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher, PublishResult, QuarantineUpdate
 from librivox_mirror.models import Book, BookArtifact, BookStatus, QuarantineRecord, SyncState
@@ -29,6 +30,7 @@ from librivox_mirror.network import is_transient_http_error
 from librivox_mirror.state import BookCheckpoint, StateStore
 
 PUBLISH_MAX_RETRY_DELAY = 300
+TAR_STAGING_OVERHEAD_PER_SECTION = 64 * 1024
 logger = logging.getLogger(__name__)
 
 
@@ -57,6 +59,8 @@ class MirrorRunner:
         staging_directory: Path,
         jobs: int,
         publisher: HubPublisher | None = None,
+        remote: HubPublisher | None = None,
+        staging_capacity: StagingCapacity | None = None,
     ) -> None:
         self.catalog = catalog
         self.archive = archive
@@ -64,6 +68,8 @@ class MirrorRunner:
         self.staging_directory = staging_directory
         self.jobs = jobs
         self.publisher = publisher
+        self.remote = remote if remote is not None else publisher
+        self.staging_capacity = staging_capacity
 
     def prepare_book(
         self,
@@ -93,6 +99,9 @@ class MirrorRunner:
         try:
             return self.prepare_book(book, progress=progress)
         except (SourceUnavailableError, InvalidAudioError) as error:
+            self.cleanup_downloads(book.id)
+            if self.staging_capacity is not None:
+                self.staging_capacity.release(book.id)
             detail = f"{type(error).__name__}: {error}"
             logger.error("Deferred book %s after a source failure: %s", book.id, detail)
             return BookOutcome(book=book, error=detail)
@@ -104,7 +113,7 @@ class MirrorRunner:
         *,
         progress: BookProgress | None,
     ) -> BookOutcome:
-        if self.publisher and self.publisher.has_current_book(book):
+        if self.remote and self.remote.has_current_book(book):
             self.cleanup_paths(book.id, checkpoint.artifact_path)
             if checkpoint.status != BookStatus.PUBLISHED:
                 self.state.transition(book.id, BookStatus.PUBLISHED)
@@ -119,6 +128,10 @@ class MirrorRunner:
                 progress.stage("restoring")
             artifact = self.restore_artifact(book, checkpoint.artifact_path)
             if artifact is not None:
+                if self.staging_capacity is not None:
+                    if progress is not None:
+                        progress.stage("waiting for staging")
+                    self.staging_capacity.reserve(book.id, artifact.size, existing=True)
                 self.cleanup_downloads(book.id)
                 logger.info("Resumed packed book %s from %s", book.id, artifact.path)
                 return BookOutcome(book=book, artifact=artifact)
@@ -149,6 +162,14 @@ class MirrorRunner:
             BookStatus.RESOLVED,
             archive_identifier=resolved.archive_identifier,
         )
+
+        if self.staging_capacity is not None:
+            if progress is not None:
+                progress.stage("waiting for staging")
+            self.staging_capacity.reserve(
+                book.id,
+                source_bytes * 2 + len(resolved.sections) * TAR_STAGING_OVERHEAD_PER_SECTION,
+            )
 
         download_directory = self.staging_directory / "downloads" / f"{book.id:06d}"
         logger.info(
@@ -197,6 +218,8 @@ class MirrorRunner:
             artifact_sha256=artifact.sha256,
         )
         self.cleanup_downloads(book.id)
+        if self.staging_capacity is not None:
+            self.staging_capacity.resize(book.id, artifact.size)
         logger.info(
             "Packed book %s into %.1f MiB at %s in %.1fs",
             book.id,
@@ -254,6 +277,8 @@ class MirrorRunner:
                 published_revision=result.revision,
             )
             self.cleanup(artifact)
+            if self.staging_capacity is not None:
+                self.staging_capacity.release(artifact.book.id)
         logger.info(
             "Published revision %s in %.1fs (%.1f MiB/s effective)",
             result.revision,
