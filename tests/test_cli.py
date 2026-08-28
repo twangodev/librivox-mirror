@@ -27,6 +27,19 @@ def test_version() -> None:
     assert unstyle(result.stdout).strip() == "0.0.0"
 
 
+def test_cli_disables_huggingface_progress_renderers(monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(
+        "librivox_mirror.cli.disable_huggingface_progress_bars",
+        lambda: calls.append(None),
+    )
+
+    result = runner.invoke(app, ["version"])
+
+    assert result.exit_code == 0
+    assert calls == [None]
+
+
 def test_help_names_the_command() -> None:
     result = runner.invoke(app, ["--help"])
 

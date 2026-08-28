@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Annotated, cast
 
 import typer
+from huggingface_hub.utils import disable_progress_bars as disable_huggingface_progress_bars
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.progress import (
@@ -127,6 +128,7 @@ def root(
     ] = None,
 ) -> None:
     """Build and maintain an ML-ready Hugging Face mirror of LibriVox."""
+    disable_huggingface_progress_bars()
     output = Console(no_color=json_output)
     errors = Console(stderr=True, no_color=json_output)
     handlers: list[logging.Handler] = [
