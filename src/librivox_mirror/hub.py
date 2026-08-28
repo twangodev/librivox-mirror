@@ -236,12 +236,13 @@ class HubPublisher:
             return SyncState()
         state = SyncState.model_validate_json(path.read_text())
         if state.schema_version < 2:
-            return state.model_copy(
+            state = state.model_copy(
                 update={
-                    "schema_version": 2,
                     "audio_seconds_by_language": self._load_audio_seconds_by_language(),
                 }
             )
+        if state.schema_version < 3:
+            state = state.model_copy(update={"schema_version": 3})
         return state
 
     def _load_audio_seconds_by_language(self) -> dict[str, int]:

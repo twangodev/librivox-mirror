@@ -147,13 +147,18 @@ class QuarantineRecord(MirrorModel):
 
 
 class SyncState(MirrorModel):
-    schema_version: int = 2
+    schema_version: int = 3
     catalog_watermark: int = 0
     published_books: int = 0
     published_sections: int = 0
     quarantined_books: int = 0
     audio_seconds_by_language: dict[str, int] = Field(default_factory=dict)
     updated_at: datetime | None = None
+
+    @computed_field
+    @property
+    def audio_hours(self) -> float:
+        return round(sum(self.audio_seconds_by_language.values()) / 3600, 1)
 
 
 class BookStatus(StrEnum):

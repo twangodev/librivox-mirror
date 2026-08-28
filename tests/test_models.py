@@ -1,4 +1,4 @@
-from librivox_mirror.models import Author, Book, Reader, Section
+from librivox_mirror.models import Author, Book, Reader, Section, SyncState
 
 
 def make_book() -> Book:
@@ -37,3 +37,10 @@ def test_source_fingerprint_changes_with_source_metadata() -> None:
     assert (
         book.source_fingerprint != book.model_copy(update={"title": "Changed"}).source_fingerprint
     )
+
+
+def test_sync_state_serializes_derived_audio_hours() -> None:
+    state = SyncState(audio_seconds_by_language={"English": 36_000, "French": 9_000})
+
+    assert state.audio_hours == 12.5
+    assert state.model_dump(mode="json")["audio_hours"] == 12.5

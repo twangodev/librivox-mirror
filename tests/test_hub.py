@@ -229,7 +229,7 @@ def test_load_sync_state_migrates_audio_statistics(book: Book, tmp_path, monkeyp
 
     state = publisher.load_sync_state()
 
-    assert state.schema_version == 2
+    assert state.schema_version == 3
     assert state.audio_seconds_by_language == {"English": 1}
 
 
