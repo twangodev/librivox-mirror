@@ -36,10 +36,18 @@ def test_artifact_is_byte_deterministic_and_self_describing(book: Book, tmp_path
         path=audio_path,
         sha256=hashlib.sha256(content).hexdigest(),
     )
+    packing_progress = []
 
-    first = build_artifact(resolved, [download], tmp_path / "first")
+    first = build_artifact(
+        resolved,
+        [download],
+        tmp_path / "first",
+        progress=lambda completed, total: packing_progress.append((completed, total)),
+    )
     second = build_artifact(resolved, [download], tmp_path / "second")
 
+    assert packing_progress[0] == (0, len(content))
+    assert packing_progress[-1] == (len(content), len(content))
     assert first.sha256 == second.sha256
     assert first.path.read_bytes() == second.path.read_bytes()
     assert verify_artifact(first.path, first.sha256) == (first.sha256, 1)

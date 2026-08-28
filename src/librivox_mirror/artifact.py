@@ -5,8 +5,9 @@ import io
 import json
 import os
 import tarfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path, PurePosixPath
+from typing import BinaryIO, cast
 
 import mutagen
 
@@ -17,6 +18,8 @@ from librivox_mirror.models import (
     canonical_metadata_json,
 )
 
+PACKING_PROGRESS_INTERVAL_BYTES = 1024 * 1024
+
 
 class InvalidAudioError(ValueError):
     pass
@@ -24,6 +27,26 @@ class InvalidAudioError(ValueError):
 
 class InvalidArtifactError(ValueError):
     pass
+
+
+class _ProgressReader:
+    def __init__(self, source: BinaryIO, advance: Callable[[int], None]) -> None:
+        self._source = source
+        self._advance = advance
+        self._pending_bytes = 0
+
+    def read(self, size: int = -1) -> bytes:
+        content = self._source.read(size)
+        self._pending_bytes += len(content)
+        if self._pending_bytes >= PACKING_PROGRESS_INTERVAL_BYTES:
+            self.flush_progress()
+        return content
+
+    def flush_progress(self) -> None:
+        if self._pending_bytes == 0:
+            return
+        self._advance(self._pending_bytes)
+        self._pending_bytes = 0
 
 
 def artifact_path(root: Path, book_id: int) -> Path:
@@ -38,6 +61,8 @@ def build_artifact(
     resolved: ResolvedBook,
     downloads: Iterable[DownloadedSection],
     root: Path,
+    *,
+    progress: Callable[[int, int], None] | None = None,
 ) -> BookArtifact:
     ordered = tuple(sorted(downloads, key=lambda item: item.resolved.section.id))
     expected_ids = {section.section.id for section in resolved.sections}
@@ -49,13 +74,30 @@ def build_artifact(
     for download in ordered:
         verify_mp3(download.path)
 
+    total_bytes = sum(download.path.stat().st_size for download in ordered)
+    completed_bytes = 0
+
+    def advance(byte_count: int) -> None:
+        nonlocal completed_bytes
+        completed_bytes += byte_count
+        if progress is not None:
+            progress(completed_bytes, total_bytes)
+
+    if progress is not None:
+        progress(0, total_bytes)
+
     destination = artifact_path(root, resolved.book.id)
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(".tar.partial")
     with tarfile.open(partial, mode="w", format=tarfile.USTAR_FORMAT) as archive:
         for download in ordered:
             key = download.resolved.section.sample_key
-            add_path(archive, f"{key}.mp3", download.path)
+            add_path(
+                archive,
+                f"{key}.mp3",
+                download.path,
+                advance=advance if progress is not None else None,
+            )
             metadata = section_metadata(resolved, download)
             add_bytes(archive, f"{key}.json", canonical_json(metadata))
     sync_file(partial)
@@ -160,10 +202,21 @@ def verify_artifact(path: Path, expected_sha256: str | None = None) -> tuple[str
     return sha256, len(stems)
 
 
-def add_path(archive: tarfile.TarFile, name: str, path: Path) -> None:
+def add_path(
+    archive: tarfile.TarFile,
+    name: str,
+    path: Path,
+    *,
+    advance: Callable[[int], None] | None = None,
+) -> None:
     info = tar_info(name, path.stat().st_size)
     with path.open("rb") as source:
-        archive.addfile(info, source)
+        if advance is None:
+            archive.addfile(info, source)
+            return
+        reader = _ProgressReader(source, advance)
+        archive.addfile(info, cast(BinaryIO, reader))
+        reader.flush_progress()
 
 
 def add_bytes(archive: tarfile.TarFile, name: str, content: bytes) -> None:

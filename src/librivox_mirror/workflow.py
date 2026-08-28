@@ -39,6 +39,8 @@ class BookProgress(Protocol):
 
     def download(self, completed_bytes: int, total_bytes: int) -> None: ...
 
+    def pack(self, completed_bytes: int, total_bytes: int) -> None: ...
+
 
 @dataclass(frozen=True)
 class BookOutcome:
@@ -206,7 +208,12 @@ class MirrorRunner:
         if progress is not None:
             progress.stage("packing")
         pack_started_at = time.monotonic()
-        artifact = build_artifact(resolved, downloads, self.staging_directory / "repository")
+        artifact = build_artifact(
+            resolved,
+            downloads,
+            self.staging_directory / "repository",
+            progress=progress.pack if progress is not None else None,
+        )
         write_artifact_manifest(artifact, self.manifest_path(book.id))
         self.state.transition(
             book.id,
@@ -217,12 +224,14 @@ class MirrorRunner:
         self.cleanup_downloads(book.id)
         if self.staging_capacity is not None:
             self.staging_capacity.resize(book.id, artifact.size)
+        pack_seconds = time.monotonic() - pack_started_at
         logger.info(
-            "Packed book %s into %.1f MiB at %s in %.1fs",
+            "Packed book %s into %.1f MiB at %s in %.1fs (%.1f MiB/s effective)",
             book.id,
             artifact.size / 1024**2,
             artifact.path,
-            time.monotonic() - pack_started_at,
+            pack_seconds,
+            artifact.size / 1024**2 / max(pack_seconds, 0.001),
         )
         return BookOutcome(book=book, artifact=artifact)
 

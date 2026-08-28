@@ -76,34 +76,48 @@ class TerminalBookProgress:
         self.progress.update(self.task_id, completed=completed_bytes, total=total_bytes)
         self.heartbeat.download(completed_bytes, total_bytes)
 
+    def pack(self, completed_bytes: int, total_bytes: int) -> None:
+        if completed_bytes == 0:
+            self.progress.reset(self.task_id, completed=0, total=total_bytes)
+        else:
+            self.progress.update(self.task_id, completed=completed_bytes, total=total_bytes)
+        self.heartbeat.pack(completed_bytes, total_bytes)
+
 
 @dataclass
 class LoggingBookProgress:
     book_id: int
     interval_seconds: float = 10
-    started_at: float | None = field(default=None, init=False)
-    last_reported_at: float = field(default=0, init=False)
+    started_at: dict[str, float] = field(default_factory=dict, init=False)
+    last_reported_at: dict[str, float] = field(default_factory=dict, init=False)
 
     def stage(self, stage: str) -> None:
         return
 
     def download(self, completed_bytes: int, total_bytes: int) -> None:
+        self._report_transfer("download", completed_bytes, total_bytes)
+
+    def pack(self, completed_bytes: int, total_bytes: int) -> None:
+        self._report_transfer("packing", completed_bytes, total_bytes)
+
+    def _report_transfer(self, phase: str, completed_bytes: int, total_bytes: int) -> None:
         now = time.monotonic()
-        if self.started_at is None:
-            self.started_at = now
-        if completed_bytes < total_bytes and now - self.last_reported_at < self.interval_seconds:
+        started_at = self.started_at.setdefault(phase, now)
+        last_reported_at = self.last_reported_at.get(phase, 0)
+        if completed_bytes < total_bytes and now - last_reported_at < self.interval_seconds:
             return
-        elapsed = max(now - self.started_at, 0.001)
+        elapsed = max(now - started_at, 0.001)
         percent = completed_bytes / total_bytes * 100 if total_bytes else 100
         logger.info(
-            "Book %s download: %.1f/%.1f MiB (%.1f%%, %.1f MiB/s)",
+            "Book %s %s: %.1f/%.1f MiB (%.1f%%, %.1f MiB/s)",
             self.book_id,
+            phase,
             completed_bytes / 1024**2,
             total_bytes / 1024**2,
             percent,
             completed_bytes / 1024**2 / elapsed,
         )
-        self.last_reported_at = now
+        self.last_reported_at[phase] = now
 
 
 @app.callback()
