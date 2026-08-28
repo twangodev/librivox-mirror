@@ -7,9 +7,7 @@
 
 Fast, structured, continuously updated LibriVox audio mirror.
 
-Original MP3s are mirrored to Hugging Face as deterministic WebDataset TARs with
-compact Parquet indexes. Dedicated infrastructure handles the initial backfill;
-GitHub Actions handles updates.
+Original MP3s are stored as WebDataset TARs with Parquet indexes.
 
 ## Install
 
@@ -25,8 +23,8 @@ librivox-mirror mirror 47
 librivox-mirror backfill --start-id 1 --end-id 1000
 ```
 
-Set `HF_DATASET_REPO` and `HF_TOKEN` to publish. Local SQLite checkpoints make
-backfills resumable.
+Set `HF_DATASET_REPO` and `HF_TOKEN` to publish. Backfills resume from local SQLite
+checkpoints.
 
 ## Dataset
 
@@ -35,16 +33,7 @@ backfills resumable.
 - `books`: one Parquet row per book
 - `data/`: streaming WebDataset audio and sample metadata
 
-Audio is never transcoded. Complete LibriVox and Internet Archive metadata and
-checksums are preserved.
-
-## Develop
-
-```console
-uv sync --locked --group dev --no-group integration
-```
-
-Python 3.12–3.14 is supported. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Audio is unmodified; source metadata and checksums are preserved.
 
 ## Licenses
 
