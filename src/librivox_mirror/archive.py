@@ -13,9 +13,13 @@ from typing import Any, cast
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
-import requests
-from internetarchive.session import ArchiveSession
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+from tenacity import (
+    before_sleep_log,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from librivox_mirror.models import (
     ArchiveFile,
@@ -31,6 +35,7 @@ from librivox_mirror.models import (
 from librivox_mirror.network import is_transient_http_error
 
 ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
+ARCHIVE_METADATA_URL = "https://archive.org/metadata/{identifier}"
 DOWNLOAD_ATTEMPTS = 10
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,16 @@ class DownloadIntegrityError(OSError):
 
 class SourceUnavailableError(OSError):
     pass
+
+
+class InvalidMetadataResponseError(ValueError):
+    pass
+
+
+def is_retryable_metadata_error(error: BaseException) -> bool:
+    return isinstance(error, InvalidMetadataResponseError) or (
+        isinstance(error, Exception) and is_transient_http_error(error)
+    )
 
 
 class RequestLimiter:
@@ -167,15 +182,9 @@ class InternetArchiveClient:
         request_delay: float = 1,
         timeout: float = 120,
         download_jobs: int = 4,
-        archive_session: ArchiveSession | None = None,
         client: httpx.Client | None = None,
     ) -> None:
-        self.timeout = timeout
-        self._limiter = RequestLimiter(request_delay)
-        self._metadata_lock = threading.Lock()
-        self._archive_session = archive_session or ArchiveSession(
-            config={"general": {"user_agent_suffix": user_agent}}
-        )
+        self._metadata_limiter = RequestLimiter(request_delay)
         self._owns_client = client is None
         self._client = client or httpx.Client(
             headers={"User-Agent": user_agent},
@@ -188,7 +197,6 @@ class InternetArchiveClient:
         self._download_pool.close()
         if self._owns_client:
             self._client.close()
-        self._archive_session.close()
 
     def __enter__(self) -> InternetArchiveClient:
         return self
@@ -205,20 +213,29 @@ class InternetArchiveClient:
                 f"could not parse an Internet Archive identifier from {book.url_iarchive!r}",
             )
         try:
-            with self._metadata_lock:
-                item = self._get_item(identifier)
-        except requests.RequestException as error:
+            payload = self._get_metadata(identifier)
+        except (httpx.HTTPError, InvalidMetadataResponseError) as error:
             raise SourceUnavailableError(
                 f"could not load Internet Archive item {identifier!r}: {error}"
             ) from error
-        if not item.exists:
+        if not payload:
             raise quarantine(
                 book,
                 QuarantineCode.ARCHIVE_ITEM_MISSING,
                 f"Internet Archive item {identifier!r} does not exist",
                 identifier,
             )
-        return resolve_original_files(book, identifier, item.files, item.metadata)
+        files = payload.get("files")
+        metadata = payload.get("metadata")
+        if not isinstance(files, list) or not all(isinstance(row, Mapping) for row in files):
+            raise SourceUnavailableError(
+                f"Internet Archive item {identifier!r} returned invalid file metadata"
+            )
+        if not isinstance(metadata, Mapping):
+            raise SourceUnavailableError(
+                f"Internet Archive item {identifier!r} returned invalid item metadata"
+            )
+        return resolve_original_files(book, identifier, files, metadata)
 
     def download_book(
         self,
@@ -312,17 +329,24 @@ class InternetArchiveClient:
         raise AssertionError("download retry loop terminated unexpectedly")
 
     @retry(
-        retry=retry_if_exception_type(requests.RequestException),
+        retry=retry_if_exception(is_retryable_metadata_error),
         stop=stop_after_attempt(5),
         wait=wait_exponential_jitter(initial=1, max=30),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
-    def _get_item(self, identifier: str):
-        self._limiter.wait()
-        return self._archive_session.get_item(
-            identifier,
-            request_kwargs={"timeout": self.timeout},
-        )
+    def _get_metadata(self, identifier: str) -> Mapping[str, Any]:
+        self._metadata_limiter.wait()
+        url = ARCHIVE_METADATA_URL.format(identifier=quote(identifier, safe=""))
+        response = self._client.get(url)
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise InvalidMetadataResponseError("response was not valid JSON") from error
+        if not isinstance(payload, Mapping):
+            raise InvalidMetadataResponseError("response was not a JSON object")
+        return payload
 
     def _download_once(
         self,
@@ -332,7 +356,6 @@ class InternetArchiveClient:
         *,
         progress: Callable[[int], None] | None = None,
     ) -> str:
-        self._limiter.wait()
         url = ARCHIVE_DOWNLOAD_URL.format(
             identifier=quote(identifier, safe=""),
             filename=quote(archive_file.name, safe="/"),

@@ -156,7 +156,7 @@ def root(
         handlers=handlers,
         force=True,
     )
-    for logger_name in ("httpcore", "httpx", "huggingface_hub", "internetarchive", "urllib3"):
+    for logger_name in ("httpcore", "httpx", "huggingface_hub", "urllib3"):
         logging.getLogger(logger_name).setLevel(logging.DEBUG if verbose else logging.WARNING)
     context.obj = AppSettings(
         json_output=json_output,
@@ -269,7 +269,13 @@ def plan_command(
         bool,
         typer.Option(help="Resolve Internet Archive originals and report source bytes."),
     ] = False,
-    request_delay: Annotated[float, typer.Option(min=0)] = 1,
+    request_delay: Annotated[
+        float,
+        typer.Option(
+            min=0,
+            help="Minimum seconds between Internet Archive metadata request starts.",
+        ),
+    ] = 1,
     user_agent: Annotated[
         str,
         typer.Option(envvar="LIBRIVOX_MIRROR_USER_AGENT"),
@@ -344,7 +350,13 @@ def mirror(
             help="Maximum concurrent MP3 downloads.",
         ),
     ] = 4,
-    request_delay: Annotated[float, typer.Option(min=0)] = 1,
+    request_delay: Annotated[
+        float,
+        typer.Option(
+            min=0,
+            help="Minimum seconds between Internet Archive metadata request starts.",
+        ),
+    ] = 1,
     dry_run: Annotated[bool, typer.Option()] = False,
     user_agent: Annotated[
         str,
@@ -421,7 +433,10 @@ def backfill(
     ] = 8,
     request_delay: Annotated[
         float,
-        typer.Option(min=0, help="Minimum seconds between Internet Archive requests."),
+        typer.Option(
+            min=0,
+            help="Minimum seconds between Internet Archive metadata request starts.",
+        ),
     ] = 1,
     staging_limit_gib: Annotated[
         int,
@@ -485,14 +500,15 @@ def backfill(
             )
             logger.info(
                 "Streaming LibriVox catalog books %s-%s into %s-book commits with "
-                "%s book workers, %s total download workers, %s upload workers, and a %s GiB "
-                "staging limit",
+                "%s book workers, %s total download workers, %s upload workers, %ss metadata "
+                "request spacing, and a %s GiB staging limit",
                 start_id,
                 end_id,
                 commit_size,
                 book_jobs,
                 download_jobs,
                 upload_jobs,
+                request_delay,
                 staging_limit_gib,
             )
             with prefetch(catalog_progress(books), capacity=max(50, commit_size * 2)) as queued:
@@ -533,7 +549,13 @@ def sync(
             help="Maximum concurrent MP3 downloads.",
         ),
     ] = 2,
-    request_delay: Annotated[float, typer.Option(min=0)] = 1,
+    request_delay: Annotated[
+        float,
+        typer.Option(
+            min=0,
+            help="Minimum seconds between Internet Archive metadata request starts.",
+        ),
+    ] = 1,
     max_books: Annotated[int, typer.Option(min=1, max=20)] = 20,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 1,
     dry_run: Annotated[bool, typer.Option()] = False,
@@ -625,7 +647,13 @@ def reconcile(
             help="Maximum concurrent MP3 downloads.",
         ),
     ] = 4,
-    request_delay: Annotated[float, typer.Option(min=0)] = 1,
+    request_delay: Annotated[
+        float,
+        typer.Option(
+            min=0,
+            help="Minimum seconds between Internet Archive metadata request starts.",
+        ),
+    ] = 1,
     max_books: Annotated[int, typer.Option(min=1, max=20)] = 20,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 1,
     dry_run: Annotated[bool, typer.Option()] = False,

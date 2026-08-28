@@ -1,7 +1,8 @@
 import hashlib
 import json
 from collections.abc import Callable
-from threading import Event, Lock
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, Event, Lock
 
 import httpx
 import pytest
@@ -99,6 +100,55 @@ def test_resolve_original_files_follows_derivative_provenance(book: Book) -> Non
     assert selected.name == "chapter.mp3"
     assert json.loads(selected.source_metadata_json)["future_archive_field"] == "preserved"
     assert json.loads(resolved.archive_metadata_json)["future_item_field"] is True
+
+
+def test_book_resolution_fetches_metadata_concurrently(book: Book) -> None:
+    simultaneous_requests = Barrier(2)
+    requested_urls: list[str] = []
+
+    def metadata_response(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        simultaneous_requests.wait(timeout=5)
+        return httpx.Response(
+            200,
+            json={"files": archive_rows(), "metadata": {"title": "Archive title"}},
+        )
+
+    with (
+        httpx.Client(transport=httpx.MockTransport(metadata_response)) as http_client,
+        InternetArchiveClient(
+            user_agent="librivox-mirror-tests",
+            request_delay=0,
+            download_jobs=1,
+            client=http_client,
+        ) as archive,
+        ThreadPoolExecutor(max_workers=2) as workers,
+    ):
+        resolved = list(workers.map(archive.resolve_book, (book, book)))
+
+    assert [result.archive_identifier for result in resolved] == ["a_test_book", "a_test_book"]
+    assert requested_urls == [
+        "https://archive.org/metadata/a_test_book",
+        "https://archive.org/metadata/a_test_book",
+    ]
+
+
+def test_missing_archive_item_is_quarantined(book: Book) -> None:
+    with (
+        httpx.Client(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))
+        ) as http_client,
+        InternetArchiveClient(
+            user_agent="librivox-mirror-tests",
+            request_delay=0,
+            download_jobs=1,
+            client=http_client,
+        ) as archive,
+        pytest.raises(QuarantinedBookError) as caught,
+    ):
+        archive.resolve_book(book)
+
+    assert caught.value.record.code == QuarantineCode.ARCHIVE_ITEM_MISSING
 
 
 def test_missing_original_quarantines_the_entire_book(book: Book) -> None:
