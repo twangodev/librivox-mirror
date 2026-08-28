@@ -5,10 +5,11 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote, unquote, urlparse
 
 import httpx
@@ -34,6 +35,7 @@ DOWNLOAD_ATTEMPTS = 10
 logger = logging.getLogger(__name__)
 
 type DownloadProgress = Callable[[int, int], None]
+type DownloadTask = Callable[[], DownloadedSection]
 
 
 class QuarantinedBookError(Exception):
@@ -65,6 +67,98 @@ class RequestLimiter:
             self._next_request = time.monotonic() + self._delay_seconds
 
 
+class DownloadBatch:
+    def __init__(self, tasks: Sequence[DownloadTask]) -> None:
+        self.pending = deque(enumerate(tasks))
+        self.results: list[DownloadedSection | None] = [None] * len(tasks)
+        self.remaining = len(tasks)
+        self.error: BaseException | None = None
+        self.done = threading.Event()
+        if not tasks:
+            self.done.set()
+
+    def result(self) -> tuple[DownloadedSection, ...]:
+        self.done.wait()
+        if self.error is not None:
+            raise self.error
+        return tuple(cast(DownloadedSection, result) for result in self.results)
+
+
+class DownloadPool:
+    def __init__(self, workers: int) -> None:
+        if workers < 1:
+            raise ValueError("download worker count must be positive")
+        self._ready: deque[DownloadBatch] = deque()
+        self._condition = threading.Condition()
+        self._closed = False
+        self._workers = tuple(
+            threading.Thread(
+                target=self._work,
+                name=f"audio-downloader-{index}",
+            )
+            for index in range(1, workers + 1)
+        )
+        for worker in self._workers:
+            worker.start()
+
+    def submit(self, tasks: Sequence[DownloadTask]) -> DownloadBatch:
+        batch = DownloadBatch(tasks)
+        with self._condition:
+            if self._closed:
+                raise RuntimeError("download pool is closed")
+            if batch.pending:
+                self._ready.append(batch)
+                self._condition.notify_all()
+        return batch
+
+    def close(self) -> None:
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+        for worker in self._workers:
+            worker.join()
+
+    def _work(self) -> None:
+        while True:
+            assignment = self._next()
+            if assignment is None:
+                return
+            batch, index, task = assignment
+            try:
+                result = task()
+            except BaseException as error:
+                self._finish(batch, index, error=error)
+            else:
+                self._finish(batch, index, result=result)
+
+    def _next(self) -> tuple[DownloadBatch, int, DownloadTask] | None:
+        with self._condition:
+            self._condition.wait_for(lambda: self._ready or self._closed)
+            if not self._ready:
+                return None
+            batch = self._ready.popleft()
+            index, task = batch.pending.popleft()
+            if batch.pending:
+                self._ready.append(batch)
+            return batch, index, task
+
+    def _finish(
+        self,
+        batch: DownloadBatch,
+        index: int,
+        *,
+        result: DownloadedSection | None = None,
+        error: BaseException | None = None,
+    ) -> None:
+        with self._condition:
+            batch.results[index] = result
+            if error is not None and batch.error is None:
+                batch.error = error
+            batch.remaining -= 1
+            if batch.remaining == 0:
+                batch.done.set()
+
+
 class InternetArchiveClient:
     def __init__(
         self,
@@ -76,15 +170,9 @@ class InternetArchiveClient:
         archive_session: ArchiveSession | None = None,
         client: httpx.Client | None = None,
     ) -> None:
-        if download_jobs < 1:
-            raise ValueError("download worker count must be positive")
         self.timeout = timeout
         self._limiter = RequestLimiter(request_delay)
         self._metadata_lock = threading.Lock()
-        self._download_executor = ThreadPoolExecutor(
-            max_workers=download_jobs,
-            thread_name_prefix="audio-downloader",
-        )
         self._archive_session = archive_session or ArchiveSession(
             config={"general": {"user_agent_suffix": user_agent}}
         )
@@ -94,9 +182,10 @@ class InternetArchiveClient:
             follow_redirects=True,
             timeout=timeout,
         )
+        self._download_pool = DownloadPool(download_jobs)
 
     def close(self) -> None:
-        self._download_executor.shutdown()
+        self._download_pool.close()
         if self._owns_client:
             self._client.close()
         self._archive_session.close()
@@ -139,7 +228,6 @@ class InternetArchiveClient:
         progress: DownloadProgress | None = None,
     ) -> tuple[DownloadedSection, ...]:
         destination.mkdir(parents=True, exist_ok=True)
-        downloads: dict[int, DownloadedSection] = {}
         completed_bytes: dict[int, int] = {}
         completed_total = 0
         progress_lock = threading.Lock()
@@ -156,30 +244,17 @@ class InternetArchiveClient:
 
         if progress is not None:
             progress(0, total_bytes)
-        futures = {
-            self._download_executor.submit(
+        tasks = [
+            partial(
                 self.download_section,
                 resolved.archive_identifier,
                 section,
                 destination,
-                progress=lambda completed, section_id=section.section.id: report(
-                    section_id, completed
-                ),
-            ): section
+                progress=partial(report, section.section.id),
+            )
             for section in resolved.sections
-        }
-        first_error: Exception | None = None
-        for future in as_completed(futures):
-            try:
-                downloaded = future.result()
-            except Exception as error:
-                if first_error is None:
-                    first_error = error
-            else:
-                downloads[downloaded.resolved.section.id] = downloaded
-        if first_error is not None:
-            raise first_error
-        return tuple(downloads[section.section.id] for section in resolved.sections)
+        ]
+        return self._download_pool.submit(tasks).result()
 
     def download_section(
         self,

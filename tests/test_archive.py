@@ -1,5 +1,7 @@
 import hashlib
 import json
+from collections.abc import Callable
+from threading import Event, Lock
 
 import httpx
 import pytest
@@ -7,6 +9,7 @@ import pytest
 from librivox_mirror.archive import (
     DOWNLOAD_ATTEMPTS,
     DownloadIntegrityError,
+    DownloadPool,
     InternetArchiveClient,
     QuarantinedBookError,
     SourceUnavailableError,
@@ -14,7 +17,7 @@ from librivox_mirror.archive import (
     resolve_original_files,
     verify_download,
 )
-from librivox_mirror.models import Book, QuarantineCode
+from librivox_mirror.models import Book, DownloadedSection, QuarantineCode
 
 
 class StubDownloadClient(InternetArchiveClient):
@@ -148,36 +151,86 @@ def test_corrupt_staged_download_is_replaced(book: Book, tmp_path) -> None:
     assert client.attempts == 1
 
 
-def test_books_share_one_global_download_pool(book: Book, tmp_path, monkeypatch) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
+def test_book_download_reports_progress(book: Book, tmp_path) -> None:
     resolved = resolve_original_files(book, "a_test_book", archive_rows())
-    worker_counts = []
     progress = []
-
-    def executor(*, max_workers, thread_name_prefix):
-        worker_counts.append(max_workers)
-        return ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix=thread_name_prefix,
-        )
-
-    monkeypatch.setattr("librivox_mirror.archive.ThreadPoolExecutor", executor)
 
     with PooledStubDownloadClient(b"original audio", download_jobs=12) as client:
         client.download_book(
             resolved,
-            tmp_path / "first",
-            progress=lambda completed, total: progress.append((completed, total)),
-        )
-        client.download_book(
-            resolved,
-            tmp_path / "second",
+            tmp_path,
             progress=lambda completed, total: progress.append((completed, total)),
         )
 
-    assert worker_counts == [12]
-    assert progress == [(0, 14), (0, 14), (14, 14)] * 2
+    assert progress == [(0, 14), (0, 14), (14, 14)]
+
+
+def test_download_pool_schedules_books_fairly(book: Book, tmp_path) -> None:
+    resolved = resolve_original_files(book, "a_test_book", archive_rows()).sections[0]
+    downloaded = DownloadedSection(resolved=resolved, path=tmp_path / "audio.mp3", sha256="hash")
+    first_started = Event()
+    release_first = Event()
+    order: list[str] = []
+
+    def task(name: str, *, blocks: bool = False) -> Callable[[], DownloadedSection]:
+        def run() -> DownloadedSection:
+            order.append(name)
+            if blocks:
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            return downloaded
+
+        return run
+
+    pool = DownloadPool(workers=1)
+    try:
+        first = pool.submit([task("a1", blocks=True), task("a2"), task("a3")])
+        assert first_started.wait(timeout=5)
+        second = pool.submit([task("b1"), task("b2")])
+        release_first.set()
+
+        first.result()
+        second.result()
+    finally:
+        pool.close()
+
+    assert order == ["a1", "a2", "b1", "a3", "b2"]
+
+
+def test_download_pool_enforces_the_global_worker_limit(book: Book, tmp_path) -> None:
+    resolved = resolve_original_files(book, "a_test_book", archive_rows()).sections[0]
+    downloaded = DownloadedSection(resolved=resolved, path=tmp_path / "audio.mp3", sha256="hash")
+    release = Event()
+    capacity_reached = Event()
+    lock = Lock()
+    active = 0
+    peak = 0
+
+    def task() -> Callable[[], DownloadedSection]:
+        def run() -> DownloadedSection:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+                if active == 3:
+                    capacity_reached.set()
+            assert release.wait(timeout=5)
+            with lock:
+                active -= 1
+            return downloaded
+
+        return run
+
+    pool = DownloadPool(workers=3)
+    try:
+        batch = pool.submit([task() for _ in range(10)])
+        assert capacity_reached.wait(timeout=5)
+        release.set()
+        batch.result()
+    finally:
+        pool.close()
+
+    assert peak == 3
 
 
 def test_download_retries_integrity_failures(book: Book, tmp_path, monkeypatch) -> None:
