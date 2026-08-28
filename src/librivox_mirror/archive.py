@@ -31,6 +31,7 @@ from librivox_mirror.network import is_transient_http_error
 
 ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
 DOWNLOAD_ATTEMPTS = 10
+MAX_DOWNLOAD_JOBS = 8
 logger = logging.getLogger(__name__)
 
 
@@ -127,7 +128,7 @@ class InternetArchiveClient:
         jobs: int,
     ) -> tuple[DownloadedSection, ...]:
         destination.mkdir(parents=True, exist_ok=True)
-        worker_count = max(1, min(jobs, 4))
+        worker_count = max(1, min(jobs, MAX_DOWNLOAD_JOBS))
         downloads: dict[int, DownloadedSection] = {}
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {

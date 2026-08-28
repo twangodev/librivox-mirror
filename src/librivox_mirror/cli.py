@@ -15,7 +15,7 @@ from rich.logging import RichHandler
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from librivox_mirror import __version__
-from librivox_mirror.archive import InternetArchiveClient, QuarantinedBookError
+from librivox_mirror.archive import MAX_DOWNLOAD_JOBS, InternetArchiveClient, QuarantinedBookError
 from librivox_mirror.artifact import verify_artifact
 from librivox_mirror.catalog import BookNotFoundError, LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher
@@ -256,7 +256,7 @@ def mirror(
     ] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[int, typer.Option(min=1, max=4)] = 4,
+    jobs: Annotated[int, typer.Option(min=1, max=MAX_DOWNLOAD_JOBS)] = 4,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     dry_run: Annotated[bool, typer.Option()] = False,
     user_agent: Annotated[
@@ -314,7 +314,7 @@ def backfill(
     ] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[int, typer.Option(min=1, max=4)] = 4,
+    jobs: Annotated[int, typer.Option(min=1, max=MAX_DOWNLOAD_JOBS)] = 4,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     max_books: Annotated[int | None, typer.Option(min=1)] = None,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 20,
@@ -473,7 +473,7 @@ def reconcile(
     end_id: Annotated[int | None, typer.Option(min=1)] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[int, typer.Option(min=1, max=4)] = 4,
+    jobs: Annotated[int, typer.Option(min=1, max=MAX_DOWNLOAD_JOBS)] = 4,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     max_books: Annotated[int, typer.Option(min=1, max=20)] = 20,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 1,

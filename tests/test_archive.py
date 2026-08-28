@@ -6,6 +6,7 @@ import pytest
 
 from librivox_mirror.archive import (
     DOWNLOAD_ATTEMPTS,
+    MAX_DOWNLOAD_JOBS,
     DownloadIntegrityError,
     InternetArchiveClient,
     QuarantinedBookError,
@@ -132,6 +133,27 @@ def test_corrupt_staged_download_is_replaced(book: Book, tmp_path) -> None:
 
     assert downloaded.path.read_bytes() == b"original audio"
     assert client.attempts == 1
+
+
+def test_book_download_uses_eight_workers(book: Book, tmp_path, monkeypatch) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+
+    resolved = resolve_original_files(book, "a_test_book", archive_rows())
+    worker_counts = []
+
+    def executor(*, max_workers):
+        worker_counts.append(max_workers)
+        return ThreadPoolExecutor(max_workers=max_workers)
+
+    monkeypatch.setattr("librivox_mirror.archive.ThreadPoolExecutor", executor)
+
+    StubDownloadClient(b"original audio").download_book(
+        resolved,
+        tmp_path,
+        jobs=MAX_DOWNLOAD_JOBS,
+    )
+
+    assert worker_counts == [8]
 
 
 def test_download_retries_integrity_failures(book: Book, tmp_path, monkeypatch) -> None:

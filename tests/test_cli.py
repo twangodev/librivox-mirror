@@ -77,6 +77,27 @@ def test_invalid_range_is_a_usage_error() -> None:
     assert "start-id" in unstyle(result.output)
 
 
+def test_backfill_accepts_eight_download_jobs() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "backfill",
+            "--start-id",
+            "20",
+            "--end-id",
+            "10",
+            "--repo",
+            "owner/repo",
+            "--jobs",
+            "8",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "start-id" in unstyle(result.output)
+    assert "not in the range" not in unstyle(result.output)
+
+
 def test_status_reports_persistent_progress_as_json(book, tmp_path) -> None:
     state_path = tmp_path / "state.sqlite3"
     with StateStore(state_path) as state:
