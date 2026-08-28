@@ -17,9 +17,9 @@ $configs
 
 # LibriVox Mirror
 
-[![License: CC BY 4.0](https://img.shields.io/badge/license-CC_BY_4.0-2ea44f?style=flat-square&logo=creativecommons&logoColor=white)](https://creativecommons.org/licenses/by/4.0/)
-[![Hugging Face dataset](https://img.shields.io/badge/Hugging_Face-dataset-FFD21E?style=flat-square&logo=huggingface&logoColor=000)]($repo_url)
-![Last updated](https://img.shields.io/badge/last_updated-$updated_at_badge-0969da?style=flat-square&logo=githubactions&logoColor=white)
+[![License: CC BY 4.0](https://img.shields.io/badge/license-CC_BY_4.0-2ea44f?style=flat&logo=creativecommons&logoColor=white)](https://creativecommons.org/licenses/by/4.0/)
+[![Hugging Face dataset](https://img.shields.io/badge/Hugging_Face-dataset-FFD21E?style=flat&logo=huggingface&logoColor=000)]($repo_url)
+![Last updated](https://img.shields.io/badge/last_updated-$updated_at_badge-0969da?style=flat&logo=githubactions&logoColor=white)
 
 Fast, structured, continuously updated LibriVox audio mirror.
 
