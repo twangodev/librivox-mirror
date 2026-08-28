@@ -5,6 +5,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from librivox_mirror.archive import (
     InternetArchiveClient,
@@ -29,6 +30,12 @@ from librivox_mirror.state import BookCheckpoint, StateStore
 
 PUBLISH_MAX_RETRY_DELAY = 300
 logger = logging.getLogger(__name__)
+
+
+class BookProgress(Protocol):
+    def stage(self, stage: str) -> None: ...
+
+    def download(self, completed_bytes: int, total_bytes: int) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -58,27 +65,45 @@ class MirrorRunner:
         self.jobs = jobs
         self.publisher = publisher
 
-    def prepare_book(self, book: Book) -> BookOutcome:
+    def prepare_book(
+        self,
+        book: Book,
+        *,
+        progress: BookProgress | None = None,
+    ) -> BookOutcome:
         checkpoint = self.state.discover(book)
         self.state.begin_attempt(book.id)
         started_at = time.monotonic()
+        if progress is not None:
+            progress.stage("checking")
         try:
-            outcome = self._prepare_book(book, checkpoint)
+            outcome = self._prepare_book(book, checkpoint, progress=progress)
         except Exception as error:
             self.state.record_failure(book.id, error)
             raise
         logger.info("Finished book %s in %.1fs", book.id, time.monotonic() - started_at)
         return outcome
 
-    def prepare_book_resiliently(self, book: Book) -> BookOutcome:
+    def prepare_book_resiliently(
+        self,
+        book: Book,
+        *,
+        progress: BookProgress | None = None,
+    ) -> BookOutcome:
         try:
-            return self.prepare_book(book)
+            return self.prepare_book(book, progress=progress)
         except (SourceUnavailableError, InvalidAudioError) as error:
             detail = f"{type(error).__name__}: {error}"
             logger.error("Deferred book %s after a source failure: %s", book.id, detail)
             return BookOutcome(book=book, error=detail)
 
-    def _prepare_book(self, book: Book, checkpoint: BookCheckpoint) -> BookOutcome:
+    def _prepare_book(
+        self,
+        book: Book,
+        checkpoint: BookCheckpoint,
+        *,
+        progress: BookProgress | None,
+    ) -> BookOutcome:
         if self.publisher and self.publisher.has_current_book(book):
             self.cleanup_paths(book.id, checkpoint.artifact_path)
             if checkpoint.status != BookStatus.PUBLISHED:
@@ -90,6 +115,8 @@ class MirrorRunner:
             logger.info("Book %s is already published", book.id)
             return BookOutcome(book=book, skipped=True)
         if checkpoint.status == BookStatus.PACKED:
+            if progress is not None:
+                progress.stage("restoring")
             artifact = self.restore_artifact(book, checkpoint.artifact_path)
             if artifact is not None:
                 self.cleanup_downloads(book.id)
@@ -99,6 +126,8 @@ class MirrorRunner:
             self.discard_artifact(book.id, checkpoint.artifact_path)
             self.state.restart(book.id)
 
+        if progress is not None:
+            progress.stage("resolving")
         logger.info("Resolving original files for book %s", book.id)
         resolve_started_at = time.monotonic()
         try:
@@ -125,8 +154,15 @@ class MirrorRunner:
         logger.info(
             "Downloading %s original MP3 files for book %s", len(resolved.sections), book.id
         )
+        if progress is not None:
+            progress.stage("downloading")
         download_started_at = time.monotonic()
-        downloads = self.archive.download_book(resolved, download_directory, jobs=self.jobs)
+        downloads = self.archive.download_book(
+            resolved,
+            download_directory,
+            jobs=self.jobs,
+            progress=progress.download if progress is not None else None,
+        )
         download_seconds = time.monotonic() - download_started_at
         self.state.transition(book.id, BookStatus.DOWNLOADED)
         logger.info(
@@ -136,6 +172,8 @@ class MirrorRunner:
             download_seconds,
             source_bytes / 1024**2 / max(download_seconds, 0.001),
         )
+        if progress is not None:
+            progress.stage("verifying")
         verify_started_at = time.monotonic()
         for download in downloads:
             verify_mp3(download.path)
@@ -147,6 +185,8 @@ class MirrorRunner:
             time.monotonic() - verify_started_at,
         )
 
+        if progress is not None:
+            progress.stage("packing")
         pack_started_at = time.monotonic()
         artifact = build_artifact(resolved, downloads, self.staging_directory / "repository")
         write_artifact_manifest(artifact, self.manifest_path(book.id))

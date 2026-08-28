@@ -5,7 +5,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -33,6 +33,8 @@ ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
 DOWNLOAD_ATTEMPTS = 10
 MAX_DOWNLOAD_JOBS = 8
 logger = logging.getLogger(__name__)
+
+type DownloadProgress = Callable[[int, int], None]
 
 
 class QuarantinedBookError(Exception):
@@ -126,14 +128,37 @@ class InternetArchiveClient:
         destination: Path,
         *,
         jobs: int,
+        progress: DownloadProgress | None = None,
     ) -> tuple[DownloadedSection, ...]:
         destination.mkdir(parents=True, exist_ok=True)
         worker_count = max(1, min(jobs, MAX_DOWNLOAD_JOBS))
         downloads: dict[int, DownloadedSection] = {}
+        completed_bytes: dict[int, int] = {}
+        completed_total = 0
+        progress_lock = threading.Lock()
+        total_bytes = sum(section.archive_file.size for section in resolved.sections)
+
+        def report(section_id: int, section_bytes: int) -> None:
+            nonlocal completed_total
+            if progress is None:
+                return
+            with progress_lock:
+                completed_total += section_bytes - completed_bytes.get(section_id, 0)
+                completed_bytes[section_id] = section_bytes
+                progress(completed_total, total_bytes)
+
+        if progress is not None:
+            progress(0, total_bytes)
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = {
                 executor.submit(
-                    self.download_section, resolved.archive_identifier, section, destination
+                    self.download_section,
+                    resolved.archive_identifier,
+                    section,
+                    destination,
+                    progress=lambda completed, section_id=section.section.id: report(
+                        section_id, completed
+                    ),
                 ): section
                 for section in resolved.sections
             }
@@ -147,6 +172,8 @@ class InternetArchiveClient:
         identifier: str,
         resolved: ResolvedSection,
         destination: Path,
+        *,
+        progress: Callable[[int], None] | None = None,
     ) -> DownloadedSection:
         path = destination / f"{resolved.section.sample_key}.mp3"
         if path.exists():
@@ -156,16 +183,27 @@ class InternetArchiveClient:
                 logger.warning("Replacing corrupt staged download %s: %s", path, error)
                 path.unlink()
             else:
+                if progress is not None:
+                    progress(resolved.archive_file.size)
                 return DownloadedSection(resolved=resolved, path=path, sha256=sha256)
 
         partial = path.with_suffix(".mp3.partial")
         for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            if progress is not None:
+                progress(0)
             try:
-                sha256 = self._download_once(identifier, resolved.archive_file, partial)
+                sha256 = self._download_once(
+                    identifier,
+                    resolved.archive_file,
+                    partial,
+                    progress=progress,
+                )
                 partial.replace(path)
                 return DownloadedSection(resolved=resolved, path=path, sha256=sha256)
             except (httpx.TransportError, httpx.HTTPStatusError, DownloadIntegrityError) as error:
                 partial.unlink(missing_ok=True)
+                if progress is not None:
+                    progress(0)
                 retryable = isinstance(error, DownloadIntegrityError) or is_transient_http_error(
                     error
                 )
@@ -197,7 +235,14 @@ class InternetArchiveClient:
             request_kwargs={"timeout": self.timeout},
         )
 
-    def _download_once(self, identifier: str, archive_file: ArchiveFile, partial: Path) -> str:
+    def _download_once(
+        self,
+        identifier: str,
+        archive_file: ArchiveFile,
+        partial: Path,
+        *,
+        progress: Callable[[int], None] | None = None,
+    ) -> str:
         self._limiter.wait()
         url = ARCHIVE_DOWNLOAD_URL.format(
             identifier=quote(identifier, safe=""),
@@ -220,6 +265,8 @@ class InternetArchiveClient:
                     sha1.update(chunk)
                     sha256.update(chunk)
                     size += len(chunk)
+                    if progress is not None:
+                        progress(size)
         verify_hashes(archive_file, size=size, md5=md5.hexdigest(), sha1=sha1.hexdigest())
         return sha256.hexdigest()
 

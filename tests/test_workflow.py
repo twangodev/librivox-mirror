@@ -48,7 +48,9 @@ class PreparedArchive:
     def resolve_book(self, book):
         return self.resolved
 
-    def download_book(self, resolved, destination, *, jobs):
+    def download_book(self, resolved, destination, *, jobs, progress=None):
+        if progress is not None:
+            progress(len(self.content), len(self.content))
         destination.mkdir(parents=True, exist_ok=True)
         path = destination / "section.mp3"
         path.write_bytes(self.content)

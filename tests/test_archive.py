@@ -24,9 +24,11 @@ class StubDownloadClient(InternetArchiveClient):
         self.integrity_failures = integrity_failures
         self.attempts = 0
 
-    def _download_once(self, identifier, archive_file, partial):
+    def _download_once(self, identifier, archive_file, partial, *, progress=None):
         self.attempts += 1
         partial.write_bytes(self.content)
+        if progress is not None:
+            progress(len(self.content))
         if self.attempts <= self.integrity_failures:
             raise DownloadIntegrityError("transient checksum mismatch")
         return hashlib.sha256(self.content).hexdigest()
@@ -37,7 +39,7 @@ class StatusDownloadClient(InternetArchiveClient):
         self.status_code = status_code
         self.attempts = 0
 
-    def _download_once(self, identifier, archive_file, partial):
+    def _download_once(self, identifier, archive_file, partial, *, progress=None):
         self.attempts += 1
         request = httpx.Request("GET", "https://archive.org/download/test/chapter.mp3")
         response = httpx.Response(self.status_code, request=request)
@@ -140,6 +142,7 @@ def test_book_download_uses_eight_workers(book: Book, tmp_path, monkeypatch) -> 
 
     resolved = resolve_original_files(book, "a_test_book", archive_rows())
     worker_counts = []
+    progress = []
 
     def executor(*, max_workers):
         worker_counts.append(max_workers)
@@ -151,9 +154,11 @@ def test_book_download_uses_eight_workers(book: Book, tmp_path, monkeypatch) -> 
         resolved,
         tmp_path,
         jobs=MAX_DOWNLOAD_JOBS,
+        progress=lambda completed, total: progress.append((completed, total)),
     )
 
     assert worker_counts == [8]
+    assert progress == [(0, 14), (0, 14), (14, 14)]
 
 
 def test_download_retries_integrity_failures(book: Book, tmp_path, monkeypatch) -> None:
