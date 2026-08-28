@@ -31,7 +31,6 @@ from librivox_mirror.models import (
     BookArtifact,
     QuarantineRecord,
     SyncState,
-    canonical_metadata_json,
 )
 
 AUTHOR_TYPE = pa.struct(
@@ -320,7 +319,16 @@ class HubPublisher:
         )
         updated_state = updated_state.model_copy(update={"updated_at": datetime.now(UTC)})
         state_path = self.output_directory / "sync.json"
-        state_path.write_text(canonical_metadata_json(updated_state.model_dump(mode="json")) + "\n")
+        state_path.write_text(
+            json.dumps(
+                updated_state.model_dump(mode="json"),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        )
         card_path = self.output_directory / "README.md"
         card_path.write_text(
             dataset_card(updated_state, self.repo_id, preview_available=preview_available)
