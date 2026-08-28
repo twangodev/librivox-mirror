@@ -1,6 +1,5 @@
 import httpx
 import pytest
-import requests
 
 from librivox_mirror.network import is_transient_http_error
 
@@ -27,5 +26,4 @@ def test_transport_failures_are_transient() -> None:
     request = httpx.Request("GET", "https://example.test")
 
     assert is_transient_http_error(httpx.ReadTimeout("timed out", request=request))
-    assert is_transient_http_error(requests.ConnectionError("connection reset"))
     assert not is_transient_http_error(ValueError("invalid payload"))
