@@ -49,7 +49,7 @@ class PreparedArchive:
     def resolve_book(self, book):
         return self.resolved
 
-    def download_book(self, resolved, destination, *, jobs, progress=None):
+    def download_book(self, resolved, destination, *, progress=None):
         if progress is not None:
             progress(len(self.content), len(self.content))
         destination.mkdir(parents=True, exist_ok=True)
@@ -164,7 +164,6 @@ def make_runner(
         archive=cast(InternetArchiveClient, archive),
         state=state,
         staging_directory=tmp_path / "staging",
-        jobs=2,
         publisher=publisher,
         source_index=publisher,
         staging_capacity=staging_capacity,

@@ -25,7 +25,7 @@ from rich.progress import (
 )
 
 from librivox_mirror import __version__
-from librivox_mirror.archive import MAX_DOWNLOAD_JOBS, InternetArchiveClient, QuarantinedBookError
+from librivox_mirror.archive import InternetArchiveClient, QuarantinedBookError
 from librivox_mirror.artifact import verify_artifact
 from librivox_mirror.capacity import StagingCapacity
 from librivox_mirror.catalog import BookNotFoundError, LibriVoxCatalog
@@ -39,8 +39,6 @@ DEFAULT_STATE = Path(".librivox-mirror/state.sqlite3")
 DEFAULT_STAGING = Path(".librivox-mirror/staging")
 DEFAULT_STAGING_LIMIT_GIB = 64
 MINIMUM_FREE_GIB = 10
-MAX_BOOK_JOBS = 4
-MAX_UPLOAD_JOBS = 16
 DEFAULT_USER_AGENT = (
     f"librivox-mirror/{__version__} "
     "(ML dataset mirroring; https://pypi.org/project/librivox-mirror/)"
@@ -335,7 +333,15 @@ def mirror(
     ] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[int, typer.Option(min=1, max=MAX_DOWNLOAD_JOBS)] = 4,
+    download_jobs: Annotated[
+        int,
+        typer.Option(
+            "--download-jobs",
+            "--jobs",
+            min=1,
+            help="Maximum concurrent MP3 downloads.",
+        ),
+    ] = 4,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     dry_run: Annotated[bool, typer.Option()] = False,
     user_agent: Annotated[
@@ -350,6 +356,7 @@ def mirror(
         InternetArchiveClient(
             user_agent=user_agent,
             request_delay=request_delay,
+            download_jobs=download_jobs,
         ) as archive,
     ):
         book = catalog.get_book(book_id)
@@ -362,7 +369,6 @@ def mirror(
                 archive=archive,
                 state=state,
                 staging_directory=staging,
-                jobs=jobs,
                 publisher=publisher,
                 source_index=publisher,
             )
@@ -394,17 +400,22 @@ def backfill(
     ] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[
+    download_jobs: Annotated[
         int,
-        typer.Option(min=1, max=MAX_DOWNLOAD_JOBS, help="Concurrent MP3 downloads per book."),
+        typer.Option(
+            "--download-jobs",
+            "--jobs",
+            min=1,
+            help="Maximum concurrent MP3 downloads across all books.",
+        ),
     ] = 4,
     book_jobs: Annotated[
         int,
-        typer.Option(min=1, max=MAX_BOOK_JOBS, help="Books prepared concurrently."),
+        typer.Option(min=1, help="Books prepared concurrently."),
     ] = 2,
     upload_jobs: Annotated[
         int,
-        typer.Option(min=1, max=MAX_UPLOAD_JOBS, help="Concurrent Hub upload workers."),
+        typer.Option(min=1, help="Concurrent Hub upload workers."),
     ] = 8,
     request_delay: Annotated[
         float,
@@ -456,6 +467,7 @@ def backfill(
             InternetArchiveClient(
                 user_agent=user_agent,
                 request_delay=request_delay,
+                download_jobs=download_jobs,
             ) as archive,
             RunLock(state_path),
             StateStore(state_path) as state,
@@ -465,20 +477,19 @@ def backfill(
                 archive=archive,
                 state=state,
                 staging_directory=staging,
-                jobs=jobs,
                 publisher=publisher,
                 source_index=source_index,
                 staging_capacity=staging_capacity,
             )
             logger.info(
                 "Streaming LibriVox catalog books %s-%s into %s-book commits with "
-                "%s book workers, %s downloads per book, %s upload workers, and a %s GiB "
+                "%s book workers, %s total download workers, %s upload workers, and a %s GiB "
                 "staging limit",
                 start_id,
                 end_id,
                 commit_size,
                 book_jobs,
-                jobs,
+                download_jobs,
                 upload_jobs,
                 staging_limit_gib,
             )
@@ -511,7 +522,15 @@ def sync(
     ] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[int, typer.Option(min=1, max=2)] = 2,
+    download_jobs: Annotated[
+        int,
+        typer.Option(
+            "--download-jobs",
+            "--jobs",
+            min=1,
+            help="Maximum concurrent MP3 downloads.",
+        ),
+    ] = 2,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     max_books: Annotated[int, typer.Option(min=1, max=20)] = 20,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 1,
@@ -546,6 +565,7 @@ def sync(
             InternetArchiveClient(
                 user_agent=user_agent,
                 request_delay=request_delay,
+                download_jobs=download_jobs,
             ) as archive,
             RunLock(state_path),
             StateStore(state_path) as state,
@@ -555,7 +575,6 @@ def sync(
                 archive=archive,
                 state=state,
                 staging_directory=staging,
-                jobs=jobs,
                 publisher=publisher,
             )
             outcomes, revisions = publish_batches(
@@ -595,7 +614,15 @@ def reconcile(
     end_id: Annotated[int | None, typer.Option(min=1)] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[int, typer.Option(min=1, max=MAX_DOWNLOAD_JOBS)] = 4,
+    download_jobs: Annotated[
+        int,
+        typer.Option(
+            "--download-jobs",
+            "--jobs",
+            min=1,
+            help="Maximum concurrent MP3 downloads.",
+        ),
+    ] = 4,
     request_delay: Annotated[float, typer.Option(min=0)] = 1,
     max_books: Annotated[int, typer.Option(min=1, max=20)] = 20,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 1,
@@ -626,6 +653,7 @@ def reconcile(
             InternetArchiveClient(
                 user_agent=user_agent,
                 request_delay=request_delay,
+                download_jobs=download_jobs,
             ) as archive,
             RunLock(state_path),
             StateStore(state_path) as state,
@@ -635,7 +663,6 @@ def reconcile(
                 archive=archive,
                 state=state,
                 staging_directory=staging,
-                jobs=jobs,
                 publisher=publisher,
             )
             outcomes, revisions = publish_batches(

@@ -31,7 +31,6 @@ from librivox_mirror.network import is_transient_http_error
 
 ARCHIVE_DOWNLOAD_URL = "https://archive.org/download/{identifier}/{filename}"
 DOWNLOAD_ATTEMPTS = 10
-MAX_DOWNLOAD_JOBS = 8
 logger = logging.getLogger(__name__)
 
 type DownloadProgress = Callable[[int, int], None]
@@ -73,12 +72,19 @@ class InternetArchiveClient:
         user_agent: str,
         request_delay: float = 1,
         timeout: float = 120,
+        download_jobs: int = 4,
         archive_session: ArchiveSession | None = None,
         client: httpx.Client | None = None,
     ) -> None:
+        if download_jobs < 1:
+            raise ValueError("download worker count must be positive")
         self.timeout = timeout
         self._limiter = RequestLimiter(request_delay)
         self._metadata_lock = threading.Lock()
+        self._download_executor = ThreadPoolExecutor(
+            max_workers=download_jobs,
+            thread_name_prefix="audio-downloader",
+        )
         self._archive_session = archive_session or ArchiveSession(
             config={"general": {"user_agent_suffix": user_agent}}
         )
@@ -90,6 +96,7 @@ class InternetArchiveClient:
         )
 
     def close(self) -> None:
+        self._download_executor.shutdown()
         if self._owns_client:
             self._client.close()
         self._archive_session.close()
@@ -129,11 +136,9 @@ class InternetArchiveClient:
         resolved: ResolvedBook,
         destination: Path,
         *,
-        jobs: int,
         progress: DownloadProgress | None = None,
     ) -> tuple[DownloadedSection, ...]:
         destination.mkdir(parents=True, exist_ok=True)
-        worker_count = max(1, min(jobs, MAX_DOWNLOAD_JOBS))
         downloads: dict[int, DownloadedSection] = {}
         completed_bytes: dict[int, int] = {}
         completed_total = 0
@@ -151,22 +156,29 @@ class InternetArchiveClient:
 
         if progress is not None:
             progress(0, total_bytes)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(
-                    self.download_section,
-                    resolved.archive_identifier,
-                    section,
-                    destination,
-                    progress=lambda completed, section_id=section.section.id: report(
-                        section_id, completed
-                    ),
-                ): section
-                for section in resolved.sections
-            }
-            for future in as_completed(futures):
+        futures = {
+            self._download_executor.submit(
+                self.download_section,
+                resolved.archive_identifier,
+                section,
+                destination,
+                progress=lambda completed, section_id=section.section.id: report(
+                    section_id, completed
+                ),
+            ): section
+            for section in resolved.sections
+        }
+        first_error: Exception | None = None
+        for future in as_completed(futures):
+            try:
                 downloaded = future.result()
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+            else:
                 downloads[downloaded.resolved.section.id] = downloaded
+        if first_error is not None:
+            raise first_error
         return tuple(downloads[section.section.id] for section in resolved.sections)
 
     def download_section(

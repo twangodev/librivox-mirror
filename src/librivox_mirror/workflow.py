@@ -57,7 +57,6 @@ class MirrorRunner:
         archive: InternetArchiveClient,
         state: StateStore,
         staging_directory: Path,
-        jobs: int,
         publisher: HubPublisher | None = None,
         source_index: HubPublisher | None = None,
         staging_capacity: StagingCapacity | None = None,
@@ -66,7 +65,6 @@ class MirrorRunner:
         self.archive = archive
         self.state = state
         self.staging_directory = staging_directory
-        self.jobs = jobs
         self.publisher = publisher
         self.source_index = source_index
         self.staging_capacity = staging_capacity
@@ -181,7 +179,6 @@ class MirrorRunner:
         downloads = self.archive.download_book(
             resolved,
             download_directory,
-            jobs=self.jobs,
             progress=progress.download if progress is not None else None,
         )
         download_seconds = time.monotonic() - download_started_at

@@ -6,7 +6,6 @@ import pytest
 
 from librivox_mirror.archive import (
     DOWNLOAD_ATTEMPTS,
-    MAX_DOWNLOAD_JOBS,
     DownloadIntegrityError,
     InternetArchiveClient,
     QuarantinedBookError,
@@ -44,6 +43,18 @@ class StatusDownloadClient(InternetArchiveClient):
         request = httpx.Request("GET", "https://archive.org/download/test/chapter.mp3")
         response = httpx.Response(self.status_code, request=request)
         raise httpx.HTTPStatusError("download failed", request=request, response=response)
+
+
+class PooledStubDownloadClient(StubDownloadClient):
+    def __init__(self, content: bytes, *, download_jobs: int) -> None:
+        InternetArchiveClient.__init__(
+            self,
+            user_agent="librivox-mirror-tests",
+            download_jobs=download_jobs,
+        )
+        self.content = content
+        self.integrity_failures = 0
+        self.attempts = 0
 
 
 def archive_rows() -> list[dict[str, str]]:
@@ -137,28 +148,36 @@ def test_corrupt_staged_download_is_replaced(book: Book, tmp_path) -> None:
     assert client.attempts == 1
 
 
-def test_book_download_uses_eight_workers(book: Book, tmp_path, monkeypatch) -> None:
+def test_books_share_one_global_download_pool(book: Book, tmp_path, monkeypatch) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     resolved = resolve_original_files(book, "a_test_book", archive_rows())
     worker_counts = []
     progress = []
 
-    def executor(*, max_workers):
+    def executor(*, max_workers, thread_name_prefix):
         worker_counts.append(max_workers)
-        return ThreadPoolExecutor(max_workers=max_workers)
+        return ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix=thread_name_prefix,
+        )
 
     monkeypatch.setattr("librivox_mirror.archive.ThreadPoolExecutor", executor)
 
-    StubDownloadClient(b"original audio").download_book(
-        resolved,
-        tmp_path,
-        jobs=MAX_DOWNLOAD_JOBS,
-        progress=lambda completed, total: progress.append((completed, total)),
-    )
+    with PooledStubDownloadClient(b"original audio", download_jobs=12) as client:
+        client.download_book(
+            resolved,
+            tmp_path / "first",
+            progress=lambda completed, total: progress.append((completed, total)),
+        )
+        client.download_book(
+            resolved,
+            tmp_path / "second",
+            progress=lambda completed, total: progress.append((completed, total)),
+        )
 
-    assert worker_counts == [8]
-    assert progress == [(0, 14), (0, 14), (14, 14)]
+    assert worker_counts == [12]
+    assert progress == [(0, 14), (0, 14), (14, 14)] * 2
 
 
 def test_download_retries_integrity_failures(book: Book, tmp_path, monkeypatch) -> None:

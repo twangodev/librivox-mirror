@@ -81,7 +81,32 @@ def test_invalid_range_is_a_usage_error() -> None:
     assert "start-id" in unstyle(result.output)
 
 
-def test_backfill_accepts_eight_download_jobs() -> None:
+def test_backfill_concurrency_has_no_arbitrary_upper_limits() -> None:
+    result = runner.invoke(
+        app,
+        [
+            "backfill",
+            "--start-id",
+            "20",
+            "--end-id",
+            "10",
+            "--repo",
+            "owner/repo",
+            "--download-jobs",
+            "128",
+            "--book-jobs",
+            "64",
+            "--upload-jobs",
+            "128",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "start-id" in unstyle(result.output)
+    assert "not in the range" not in unstyle(result.output)
+
+
+def test_backfill_keeps_jobs_as_a_download_jobs_alias() -> None:
     result = runner.invoke(
         app,
         [
@@ -93,7 +118,7 @@ def test_backfill_accepts_eight_download_jobs() -> None:
             "--repo",
             "owner/repo",
             "--jobs",
-            "8",
+            "128",
         ],
     )
 
