@@ -468,7 +468,7 @@ def backfill(
         max_bytes=staging_limit_gib * 1024**3,
         minimum_free_bytes=MINIMUM_FREE_GIB * 1024**3,
     )
-    with LibriVoxCatalog(user_agent=user_agent) as catalog:
+    with LibriVoxCatalog(user_agent=user_agent, retry_forever=True) as catalog:
         books: Iterable[Book] = catalog.iter_books(start_id=start_id, end_id=end_id)
         if max_books is not None:
             books = islice(books, max_books)

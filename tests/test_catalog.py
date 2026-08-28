@@ -2,6 +2,7 @@ import json
 
 import httpx
 import respx
+from tenacity import wait_none
 
 from librivox_mirror.catalog import CATALOG_URL, LibriVoxCatalog
 
@@ -152,3 +153,20 @@ def test_iter_books_seeks_past_the_catalog() -> None:
 
     assert books == []
     assert page_offsets == []
+
+
+@respx.mock
+def test_backfill_catalog_retries_past_the_normal_limit(monkeypatch) -> None:
+    monkeypatch.setattr("librivox_mirror.catalog.CATALOG_RETRY_WAIT", wait_none())
+    route = respx.get(CATALOG_URL).mock(
+        side_effect=[
+            *[httpx.ReadTimeout("catalog unavailable") for _ in range(5)],
+            httpx.Response(200, json=catalog_payload()),
+        ]
+    )
+
+    with LibriVoxCatalog(user_agent="test", retry_forever=True) as catalog:
+        book = catalog.get_book(47)
+
+    assert book.id == 47
+    assert route.call_count == 6

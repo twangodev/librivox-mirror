@@ -5,11 +5,20 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
+from tenacity import (
+    Retrying,
+    before_sleep_log,
+    retry_if_exception,
+    stop_after_attempt,
+    stop_never,
+    wait_exponential_jitter,
+)
 
 from librivox_mirror.models import Author, Book, Genre, Reader, Section, canonical_metadata_json
+from librivox_mirror.network import is_transient_http_error
 
 CATALOG_URL = "https://librivox.org/api/feed/audiobooks"
+CATALOG_RETRY_WAIT = wait_exponential_jitter(initial=1, max=30)
 logger = logging.getLogger(__name__)
 
 
@@ -25,8 +34,10 @@ class LibriVoxCatalog:
         *,
         user_agent: str,
         timeout: float = 30,
+        retry_forever: bool = False,
         client: httpx.Client | None = None,
     ) -> None:
+        self._retry_forever = retry_forever
         self._owns_client = client is None
         self._client = client or httpx.Client(
             headers={"User-Agent": user_agent},
@@ -117,13 +128,17 @@ class LibriVoxCatalog:
         logger.info("Positioned LibriVox catalog at offset %s", offset)
         return offset, book_id
 
-    @retry(
-        retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
-        stop=stop_after_attempt(5),
-        wait=wait_exponential_jitter(initial=1, max=30),
-        reraise=True,
-    )
     def _request(self, params: Mapping[str, str | int]) -> dict[str, Any]:
+        retrying = Retrying(
+            retry=retry_if_exception(is_transient_http_error),
+            stop=stop_never if self._retry_forever else stop_after_attempt(5),
+            wait=CATALOG_RETRY_WAIT,
+            before_sleep=before_sleep_log(logger, logging.WARNING),
+            reraise=True,
+        )
+        return retrying(self._request_once, params)
+
+    def _request_once(self, params: Mapping[str, str | int]) -> dict[str, Any]:
         response = self._client.get(CATALOG_URL, params={**params, "format": "json"})
         response.raise_for_status()
         return response.json()

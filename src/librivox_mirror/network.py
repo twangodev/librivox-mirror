@@ -5,7 +5,7 @@ import httpx
 TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 425, 429})
 
 
-def is_transient_http_error(error: Exception) -> bool:
+def is_transient_http_error(error: BaseException) -> bool:
     if isinstance(error, (httpx.TimeoutException, httpx.TransportError)):
         return True
     if isinstance(error, httpx.HTTPError):
