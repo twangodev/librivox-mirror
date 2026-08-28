@@ -78,6 +78,7 @@ class InternetArchiveClient:
     ) -> None:
         self.timeout = timeout
         self._limiter = RequestLimiter(request_delay)
+        self._metadata_lock = threading.Lock()
         self._archive_session = archive_session or ArchiveSession(
             config={"general": {"user_agent_suffix": user_agent}}
         )
@@ -108,7 +109,8 @@ class InternetArchiveClient:
                 f"could not parse an Internet Archive identifier from {book.url_iarchive!r}",
             )
         try:
-            item = self._get_item(identifier)
+            with self._metadata_lock:
+                item = self._get_item(identifier)
         except requests.RequestException as error:
             raise SourceUnavailableError(
                 f"could not load Internet Archive item {identifier!r}: {error}"

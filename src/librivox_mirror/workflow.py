@@ -59,7 +59,7 @@ class MirrorRunner:
         staging_directory: Path,
         jobs: int,
         publisher: HubPublisher | None = None,
-        remote: HubPublisher | None = None,
+        source_index: HubPublisher | None = None,
         staging_capacity: StagingCapacity | None = None,
     ) -> None:
         self.catalog = catalog
@@ -68,7 +68,7 @@ class MirrorRunner:
         self.staging_directory = staging_directory
         self.jobs = jobs
         self.publisher = publisher
-        self.remote = remote if remote is not None else publisher
+        self.source_index = source_index
         self.staging_capacity = staging_capacity
 
     def prepare_book(
@@ -113,7 +113,7 @@ class MirrorRunner:
         *,
         progress: BookProgress | None,
     ) -> BookOutcome:
-        if self.remote and self.remote.has_current_book(book):
+        if self.source_index and self.source_index.has_current_book(book):
             self.cleanup_paths(book.id, checkpoint.artifact_path)
             if checkpoint.status != BookStatus.PUBLISHED:
                 self.state.transition(book.id, BookStatus.PUBLISHED)

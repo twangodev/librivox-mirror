@@ -36,6 +36,7 @@ class FakeApi:
     def __init__(self) -> None:
         self.commits = []
         self.preuploads = []
+        self.preupload_kwargs = []
         self.files = set()
 
     def create_repo(self, *args, **kwargs):
@@ -52,6 +53,7 @@ class FakeApi:
 
     def preupload_lfs_files(self, repo_id, additions, **kwargs):
         self.preuploads.append(list(additions))
+        self.preupload_kwargs.append(kwargs)
 
     def create_commit(self, repo_id, operations, **kwargs):
         operations = list(operations)
@@ -145,6 +147,7 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
         token=None,
         working_directory=tmp_path / "hub",
         api=cast(HfApi, api),
+        upload_jobs=8,
     )
     artifact = make_artifact(book, tmp_path)
 
@@ -171,6 +174,8 @@ def test_publish_builds_atomic_dataset_commit(book: Book, tmp_path) -> None:
         "README.md",
     }
     assert api.commits[0][1]["parent_commit"] == "parent"
+    assert api.preupload_kwargs[0]["num_threads"] == 8
+    assert api.commits[0][1]["num_threads"] == 8
     books = pq.read_table(tmp_path / "hub/metadata/metadata/books/000.parquet").to_pylist()
     sections = pq.read_table(tmp_path / "hub/metadata/metadata/sections/000.parquet").to_pylist()
     assert books[0]["librivox_metadata"] == book.source_metadata_json

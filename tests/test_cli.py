@@ -1,14 +1,18 @@
+import io
 import json
+from threading import Event
 from typing import cast
 
 import httpx
 import respx
 from click import unstyle
+from rich.console import Console
 from typer import Context
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from librivox_mirror.catalog import CATALOG_URL
-from librivox_mirror.cli import app, publish_batches
+from librivox_mirror.cli import AppSettings, app, publish_batches
 from librivox_mirror.models import Book, BookStatus, SyncState
 from librivox_mirror.state import RunLock, StateStore
 from librivox_mirror.workflow import BookOutcome, MirrorRunner
@@ -149,19 +153,62 @@ class RecordingRunner:
         return None
 
 
+class OverlapRunner(RecordingRunner):
+    def __init__(self, second_book_id: int) -> None:
+        super().__init__()
+        self.second_book_id = second_book_id
+        self.second_book_prepared = Event()
+        self.publications = 0
+
+    def prepare_book_resiliently(self, book, *, progress):
+        if book.id == self.second_book_id:
+            self.second_book_prepared.set()
+        return BookOutcome(book=book, skipped=True)
+
+    def publish(self, outcomes, sync_state, *, commit_message):
+        self.publications += 1
+        if self.publications == 1:
+            assert self.second_book_prepared.wait(timeout=1)
+        return super().publish(outcomes, sync_state, commit_message=commit_message)
+
+
+def test_preparation_overlaps_publication(book: Book) -> None:
+    books = [book, book.model_copy(update={"id": book.id + 1})]
+    runner = OverlapRunner(books[1].id)
+    output = Console(file=io.StringIO(), force_terminal=False)
+    context = Context(get_command(app))
+    context.obj = AppSettings(
+        json_output=False,
+        verbose=False,
+        output=output,
+        errors=output,
+    )
+
+    publish_batches(
+        context,
+        cast(MirrorRunner, runner),
+        books,
+        SyncState(),
+        commit_size=1,
+        book_jobs=1,
+    )
+
+    assert runner.publications == 2
+
+
 def test_failed_batches_do_not_advance_the_catalog_watermark(book: Book, monkeypatch) -> None:
     books = [book, book.model_copy(update={"id": 48})]
     runner = RecordingRunner()
 
-    def prepare(context, mirror_runner, batch):
-        return [
-            BookOutcome(book=item, error="SourceUnavailableError: unavailable")
-            if item.id == book.id
-            else BookOutcome(book=item, skipped=True)
-            for item in batch
-        ]
+    def prepare(context, mirror_runner, batch, *, workers, capacity):
+        for item in batch:
+            yield (
+                BookOutcome(book=item, error="SourceUnavailableError: unavailable")
+                if item.id == book.id
+                else BookOutcome(book=item, skipped=True)
+            )
 
-    monkeypatch.setattr("librivox_mirror.cli.prepare_books", prepare)
+    monkeypatch.setattr("librivox_mirror.cli.prepare_books_stream", prepare)
 
     publish_batches(
         cast(Context, None),

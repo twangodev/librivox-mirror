@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from importlib.resources import files
 from pathlib import Path
 from string import Template
+from threading import RLock
 from typing import Any
 from urllib.parse import quote
 
@@ -200,7 +201,10 @@ class HubPublisher:
         token: str | None,
         working_directory: Path,
         api: HfApi | None = None,
+        upload_jobs: int = 4,
     ) -> None:
+        if upload_jobs < 1:
+            raise ValueError("upload worker count must be positive")
         self.repo_id = repo_id
         self.token = token
         self.working_directory = working_directory
@@ -209,6 +213,8 @@ class HubPublisher:
         self.cache_directory.mkdir(parents=True, exist_ok=True)
         self.output_directory.mkdir(parents=True, exist_ok=True)
         self.api = api or HfApi(token=token)
+        self.upload_jobs = upload_jobs
+        self._cache_lock = RLock()
         self._rows_cache: dict[str, list[dict[str, Any]]] = {}
 
     def ensure_repo(self) -> None:
@@ -220,7 +226,8 @@ class HubPublisher:
         )
 
     def invalidate_cache(self) -> None:
-        self._rows_cache.clear()
+        with self._cache_lock:
+            self._rows_cache.clear()
 
     def current_revision(self) -> str:
         revision = self.api.repo_info(self.repo_id, repo_type="dataset").sha
@@ -364,7 +371,7 @@ class HubPublisher:
             self.repo_id,
             additions,
             repo_type="dataset",
-            num_threads=4,
+            num_threads=self.upload_jobs,
         )
         commit = self.api.create_commit(
             self.repo_id,
@@ -372,7 +379,7 @@ class HubPublisher:
             commit_message=commit_message,
             repo_type="dataset",
             parent_commit=parent_commit,
-            num_threads=4,
+            num_threads=self.upload_jobs,
         )
         return PublishResult(revision=commit.oid, state=updated_state)
 
@@ -502,16 +509,17 @@ class HubPublisher:
         return CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=destination)
 
     def _load_rows(self, path_in_repo: str) -> list[dict[str, Any]]:
-        if path_in_repo in self._rows_cache:
-            return [dict(row) for row in self._rows_cache[path_in_repo]]
-        try:
-            path = self._download(path_in_repo)
-        except MISSING_REMOTE:
-            rows: list[dict[str, Any]] = []
-        else:
-            rows = pq.read_table(path).to_pylist()
-        self._rows_cache[path_in_repo] = rows
-        return [dict(row) for row in rows]
+        with self._cache_lock:
+            if path_in_repo in self._rows_cache:
+                return [dict(row) for row in self._rows_cache[path_in_repo]]
+            try:
+                path = self._download(path_in_repo)
+            except MISSING_REMOTE:
+                rows: list[dict[str, Any]] = []
+            else:
+                rows = pq.read_table(path).to_pylist()
+            self._rows_cache[path_in_repo] = rows
+            return [dict(row) for row in rows]
 
     def _download(self, path_in_repo: str) -> Path:
         downloaded = hf_hub_download(

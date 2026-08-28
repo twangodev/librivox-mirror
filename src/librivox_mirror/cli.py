@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Iterable, Sequence, Sized
+from collections.abc import Generator, Iterable, Sequence, Sized
 from contextlib import suppress
 from dataclasses import dataclass, field
 from itertools import batched, islice
@@ -27,15 +27,20 @@ from rich.progress import (
 from librivox_mirror import __version__
 from librivox_mirror.archive import MAX_DOWNLOAD_JOBS, InternetArchiveClient, QuarantinedBookError
 from librivox_mirror.artifact import verify_artifact
+from librivox_mirror.capacity import StagingCapacity
 from librivox_mirror.catalog import BookNotFoundError, LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher
 from librivox_mirror.models import Book, BookStatus, SyncState, canonical_metadata_json
 from librivox_mirror.state import RunLock, StateStore
-from librivox_mirror.streaming import prefetch
+from librivox_mirror.streaming import ordered_parallel_map, prefetch
 from librivox_mirror.workflow import BookOutcome, BookProgress, MirrorRunner
 
 DEFAULT_STATE = Path(".librivox-mirror/state.sqlite3")
 DEFAULT_STAGING = Path(".librivox-mirror/staging")
+DEFAULT_STAGING_LIMIT_GIB = 64
+MINIMUM_FREE_GIB = 10
+MAX_BOOK_JOBS = 4
+MAX_UPLOAD_JOBS = 16
 DEFAULT_USER_AGENT = (
     f"librivox-mirror/{__version__} "
     "(ML dataset mirroring; https://pypi.org/project/librivox-mirror/)"
@@ -359,6 +364,7 @@ def mirror(
                 staging_directory=staging,
                 jobs=jobs,
                 publisher=publisher,
+                source_index=publisher,
             )
             outcome = prepare_books(context, runner, [book], resilient=False)[0]
             sync_state = publisher.load_sync_state() if publisher else SyncState()
@@ -388,8 +394,26 @@ def backfill(
     ] = None,
     state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
     staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
-    jobs: Annotated[int, typer.Option(min=1, max=MAX_DOWNLOAD_JOBS)] = 4,
-    request_delay: Annotated[float, typer.Option(min=0)] = 1,
+    jobs: Annotated[
+        int,
+        typer.Option(min=1, max=MAX_DOWNLOAD_JOBS, help="Concurrent MP3 downloads per book."),
+    ] = 4,
+    book_jobs: Annotated[
+        int,
+        typer.Option(min=1, max=MAX_BOOK_JOBS, help="Books prepared concurrently."),
+    ] = 2,
+    upload_jobs: Annotated[
+        int,
+        typer.Option(min=1, max=MAX_UPLOAD_JOBS, help="Concurrent Hub upload workers."),
+    ] = 8,
+    request_delay: Annotated[
+        float,
+        typer.Option(min=0, help="Minimum seconds between Internet Archive requests."),
+    ] = 1,
+    staging_limit_gib: Annotated[
+        int,
+        typer.Option(min=1, help="Maximum in-flight staging reservation in GiB."),
+    ] = DEFAULT_STAGING_LIMIT_GIB,
     max_books: Annotated[int | None, typer.Option(min=1)] = None,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 20,
     dry_run: Annotated[bool, typer.Option()] = False,
@@ -400,7 +424,22 @@ def backfill(
 ) -> None:
     """Mirror an explicit LibriVox ID range in commits of at most 20 books."""
     validate_range(start_id, end_id)
-    publisher = HubPublisher(repo, token=token, working_directory=staging / "hub")
+    publisher = HubPublisher(
+        repo,
+        token=token,
+        working_directory=staging / "hub",
+        upload_jobs=upload_jobs,
+    )
+    source_index = HubPublisher(
+        repo,
+        token=token,
+        working_directory=staging / "hub-reader",
+    )
+    staging_capacity = StagingCapacity(
+        staging,
+        max_bytes=staging_limit_gib * 1024**3,
+        minimum_free_bytes=MINIMUM_FREE_GIB * 1024**3,
+    )
     with LibriVoxCatalog(user_agent=user_agent) as catalog:
         books: Iterable[Book] = catalog.iter_books(start_id=start_id, end_id=end_id)
         if max_books is not None:
@@ -428,12 +467,20 @@ def backfill(
                 staging_directory=staging,
                 jobs=jobs,
                 publisher=publisher,
+                source_index=source_index,
+                staging_capacity=staging_capacity,
             )
             logger.info(
-                "Streaming LibriVox catalog books %s-%s into %s-book commits",
+                "Streaming LibriVox catalog books %s-%s into %s-book commits with "
+                "%s book workers, %s downloads per book, %s upload workers, and a %s GiB "
+                "staging limit",
                 start_id,
                 end_id,
                 commit_size,
+                book_jobs,
+                jobs,
+                upload_jobs,
+                staging_limit_gib,
             )
             with prefetch(catalog_progress(books), capacity=max(50, commit_size * 2)) as queued:
                 outcomes, revisions = publish_batches(
@@ -442,6 +489,7 @@ def backfill(
                     queued,
                     publisher.load_sync_state(),
                     commit_size,
+                    book_jobs=book_jobs,
                 )
     emit(
         context,
@@ -629,6 +677,7 @@ def publish_batches(
     sync_state: SyncState,
     commit_size: int,
     final_catalog_watermark: int | None = None,
+    book_jobs: int = 1,
 ) -> tuple[list[dict[str, object]], list[str]]:
     if final_catalog_watermark is not None and not isinstance(books, Sized):
         raise ValueError("a final catalog watermark requires a sized book collection")
@@ -639,30 +688,39 @@ def publish_batches(
     current_state = sync_state
     processed_books = 0
     has_failures = False
-    for batch_tuple in batched(books, commit_size):
-        batch = list(batch_tuple)
-        outcomes = prepare_books(context, runner, batch)
-        all_outcomes.extend(outcome_summary(outcome) for outcome in outcomes)
-        processed_books += len(batch)
-        has_failures = has_failures or any(outcome.error for outcome in outcomes)
-        ids = [book.id for book in batch]
-        batch_state = current_state
-        if (
-            processed_books == total_books
-            and final_catalog_watermark is not None
-            and not has_failures
-        ):
-            batch_state = current_state.model_copy(
-                update={"catalog_watermark": final_catalog_watermark}
+    prepared = prepare_books_stream(
+        context,
+        runner,
+        books,
+        workers=book_jobs,
+        capacity=commit_size + book_jobs,
+    )
+    try:
+        for batch_tuple in batched(prepared, commit_size):
+            batch = list(batch_tuple)
+            all_outcomes.extend(outcome_summary(outcome) for outcome in batch)
+            processed_books += len(batch)
+            has_failures = has_failures or any(outcome.error for outcome in batch)
+            ids = [outcome.book.id for outcome in batch]
+            batch_state = current_state
+            if (
+                processed_books == total_books
+                and final_catalog_watermark is not None
+                and not has_failures
+            ):
+                batch_state = current_state.model_copy(
+                    update={"catalog_watermark": final_catalog_watermark}
+                )
+            result = runner.publish(
+                batch,
+                batch_state,
+                commit_message=f"feat(data): mirror LibriVox books {min(ids)}-{max(ids)}",
             )
-        result = runner.publish(
-            outcomes,
-            batch_state,
-            commit_message=f"feat(data): mirror LibriVox books {min(ids)}-{max(ids)}",
-        )
-        if result:
-            revisions.append(result.revision)
-            current_state = result.state
+            if result:
+                revisions.append(result.revision)
+                current_state = result.state
+    finally:
+        prepared.close()
     return all_outcomes, revisions
 
 
@@ -673,9 +731,30 @@ def prepare_books(
     *,
     resilient: bool = True,
 ) -> list[BookOutcome]:
+    return list(
+        prepare_books_stream(
+            context,
+            runner,
+            books,
+            workers=1,
+            capacity=1,
+            resilient=resilient,
+        )
+    )
+
+
+def prepare_books_stream(
+    context: typer.Context,
+    runner: MirrorRunner,
+    books: Iterable[Book],
+    *,
+    workers: int,
+    capacity: int,
+    resilient: bool = True,
+) -> Generator[BookOutcome]:
     settings = app_settings(context)
-    outcomes = []
     interactive = settings.errors.is_terminal and not settings.json_output
+    total_books = len(books) if isinstance(books, Sized) else None
     with Progress(
         SpinnerColumn(),
         TextColumn("{task.description}"),
@@ -688,8 +767,11 @@ def prepare_books(
         disable=not interactive,
         transient=True,
     ) as progress:
-        for index, book in enumerate(books, start=1):
-            description = f"[{index}/{len(books)}] Book {book.id}"
+
+        def prepare(indexed_book: tuple[int, Book]) -> BookOutcome:
+            index, book = indexed_book
+            position = f"{index}/{total_books}" if total_books is not None else str(index)
+            description = f"[{position}] Book {book.id}"
             task_id = progress.add_task(f"{description} · queued", total=None)
             book_progress: BookProgress
             if interactive:
@@ -701,10 +783,18 @@ def prepare_books(
                 )
             else:
                 book_progress = LoggingBookProgress(book.id)
-            prepare = runner.prepare_book_resiliently if resilient else runner.prepare_book
-            outcomes.append(prepare(book, progress=book_progress))
-            progress.remove_task(task_id)
-    return outcomes
+            prepare_book = runner.prepare_book_resiliently if resilient else runner.prepare_book
+            try:
+                return prepare_book(book, progress=book_progress)
+            finally:
+                progress.remove_task(task_id)
+
+        yield from ordered_parallel_map(
+            enumerate(books, start=1),
+            prepare,
+            workers=workers,
+            capacity=capacity,
+        )
 
 
 def catalog_progress(books: Iterable[Book]) -> Iterable[Book]:

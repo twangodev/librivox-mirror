@@ -166,6 +166,7 @@ def make_runner(
         staging_directory=tmp_path / "staging",
         jobs=2,
         publisher=publisher,
+        source_index=publisher,
         staging_capacity=staging_capacity,
     )
 
