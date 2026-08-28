@@ -60,9 +60,22 @@ class LibriVoxCatalog:
         page_size: int = 50,
     ) -> Iterator[Book]:
         offset = 0
+        if start_id is not None:
+            offset, first_book_id = self._seek(start_id, since=since)
+            if first_book_id is None:
+                return
+            first_book = self.get_book(first_book_id)
+            if end_id is not None and first_book.id > end_id:
+                return
+            yield first_book
+            if end_id is not None and first_book.id == end_id:
+                return
+            offset += 1
+        first_page = True
         while True:
-            if offset == 0 or offset % 1000 == 0:
+            if first_page or offset % 1000 == 0:
                 logger.info("Scanning LibriVox catalog at offset %s", offset)
+            first_page = False
             params: dict[str, str | int] = {
                 "extended": 1,
                 "limit": page_size,
@@ -82,6 +95,27 @@ class LibriVoxCatalog:
             if len(rows) < page_size:
                 return
             offset += page_size
+
+    def _seek(self, start_id: int, *, since: int | None) -> tuple[int, int | None]:
+        logger.info("Seeking LibriVox catalog to book %s", start_id)
+        params: dict[str, str | int] = {
+            "fields": "{id}",
+            "limit": max(1, start_id),
+            "offset": 0,
+        }
+        if since is not None:
+            params["since"] = since
+        rows = self._request(params).get("books") or []
+        offset = len(rows)
+        book_id = None
+        for index, row in enumerate(rows):
+            candidate_id = _required_int(row.get("id"), "book id")
+            if candidate_id >= start_id:
+                offset = index
+                book_id = candidate_id
+                break
+        logger.info("Positioned LibriVox catalog at offset %s", offset)
+        return offset, book_id
 
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),

@@ -6,7 +6,7 @@ import respx
 from librivox_mirror.catalog import CATALOG_URL, LibriVoxCatalog
 
 
-def catalog_payload() -> dict[str, object]:
+def catalog_payload() -> dict[str, list[dict[str, object]]]:
     return {
         "books": [
             {
@@ -91,3 +91,64 @@ def test_iter_books_paginates_until_a_short_page() -> None:
 
     assert [book.id for book in books] == [47]
     assert route.call_count == 2
+
+
+@respx.mock
+def test_iter_books_seeks_to_a_missing_start_id() -> None:
+    book_ids = [book_id for book_id in range(1, 3501) if book_id % 10]
+    page_offsets = []
+
+    def response(request: httpx.Request) -> httpx.Response:
+        if requested_id := request.url.params.get("id"):
+            selected = [int(requested_id)] if int(requested_id) in book_ids else []
+            offset = None
+        else:
+            offset = int(request.url.params["offset"])
+            limit = int(request.url.params["limit"])
+            selected = book_ids[offset : offset + limit]
+        extended = request.url.params.get("extended") == "1"
+        if extended and offset is not None:
+            page_offsets.append(offset)
+        rows = []
+        for book_id in selected:
+            if extended:
+                row = dict(catalog_payload()["books"][0])
+                row["id"] = str(book_id)
+            else:
+                row = {"id": str(book_id)}
+            rows.append(row)
+        return httpx.Response(200, json={"books": rows})
+
+    route = respx.get(CATALOG_URL).mock(side_effect=response)
+
+    with LibriVoxCatalog(user_agent="test") as catalog:
+        books = list(catalog.iter_books(start_id=3010, end_id=3012))
+
+    assert [book.id for book in books] == [3011, 3012]
+    assert page_offsets == [2710]
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_iter_books_seeks_past_the_catalog() -> None:
+    book_ids = [1, 3, 7, 15]
+    page_offsets = []
+
+    def response(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params["offset"])
+        limit = int(request.url.params["limit"])
+        selected = book_ids[offset : offset + limit]
+        if request.url.params.get("extended") == "1":
+            page_offsets.append(offset)
+        return httpx.Response(
+            200,
+            json={"books": [{"id": str(book_id)} for book_id in selected]},
+        )
+
+    respx.get(CATALOG_URL).mock(side_effect=response)
+
+    with LibriVoxCatalog(user_agent="test") as catalog:
+        books = list(catalog.iter_books(start_id=100))
+
+    assert books == []
+    assert page_offsets == []
