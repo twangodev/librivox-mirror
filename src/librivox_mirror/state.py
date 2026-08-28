@@ -7,6 +7,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 from typing import TextIO
 
 from librivox_mirror.models import Book, BookStatus, QuarantineRecord
@@ -102,8 +103,14 @@ class StateStore:
             path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
         self._read_only = read_only
+        self._lock = RLock()
         database = f"{path.resolve().as_uri()}?mode=ro" if read_only else path
-        self._connection = sqlite3.connect(database, timeout=30, uri=read_only)
+        self._connection = sqlite3.connect(
+            database,
+            timeout=30,
+            uri=read_only,
+            check_same_thread=False,
+        )
         self._connection.row_factory = sqlite3.Row
         self._connection.execute("PRAGMA busy_timeout=30000")
         if not read_only:
@@ -139,9 +146,10 @@ class StateStore:
             raise sqlite3.DatabaseError(f"SQLite quick check failed: {detail}")
 
     def close(self) -> None:
-        if not self._read_only:
-            self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        self._connection.close()
+        with self._lock:
+            if not self._read_only:
+                self._connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            self._connection.close()
 
     def __enter__(self) -> StateStore:
         return self
@@ -150,16 +158,18 @@ class StateStore:
         self.close()
 
     def get(self, book_id: int) -> BookCheckpoint | None:
-        row = self._connection.execute(
-            "SELECT * FROM books WHERE book_id = ?",
-            (book_id,),
-        ).fetchone()
-        return checkpoint(row) if row else None
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM books WHERE book_id = ?",
+                (book_id,),
+            ).fetchone()
+            return checkpoint(row) if row else None
 
     def discover(self, book: Book) -> BookCheckpoint:
-        now = utc_now()
-        self._connection.execute(
-            """
+        with self._lock:
+            now = utc_now()
+            self._connection.execute(
+                """
             INSERT INTO books (book_id, source_fingerprint, status, updated_at)
             VALUES (?, ?, ?, ?)
             ON CONFLICT(book_id) DO UPDATE SET
@@ -208,14 +218,14 @@ class StateStore:
                     WHEN books.source_fingerprint != excluded.source_fingerprint
                     THEN excluded.updated_at ELSE books.updated_at
                 END
-            """,
-            (book.id, book.source_fingerprint, BookStatus.DISCOVERED, now),
-        )
-        self._connection.commit()
-        discovered = self.get(book.id)
-        if discovered is None:
-            raise RuntimeError(f"failed to persist book {book.id}")
-        return discovered
+                """,
+                (book.id, book.source_fingerprint, BookStatus.DISCOVERED, now),
+            )
+            self._connection.commit()
+            discovered = self.get(book.id)
+            if discovered is None:
+                raise RuntimeError(f"failed to persist book {book.id}")
+            return discovered
 
     def transition(
         self,
@@ -227,16 +237,19 @@ class StateStore:
         artifact_sha256: str | None = None,
         published_revision: str | None = None,
     ) -> BookCheckpoint:
-        current = self.get(book_id)
-        if current is None:
-            raise KeyError(f"book {book_id} has not been discovered")
-        if status == BookStatus.QUARANTINED:
-            raise ValueError("use quarantine() to store a quarantine record")
-        current_order = STATUS_ORDER.get(current.status, -1)
-        if current.status != BookStatus.QUARANTINED and STATUS_ORDER[status] < current_order:
-            raise ValueError(f"cannot move book {book_id} from {current.status} back to {status}")
-        self._connection.execute(
-            """
+        with self._lock:
+            current = self.get(book_id)
+            if current is None:
+                raise KeyError(f"book {book_id} has not been discovered")
+            if status == BookStatus.QUARANTINED:
+                raise ValueError("use quarantine() to store a quarantine record")
+            current_order = STATUS_ORDER.get(current.status, -1)
+            if current.status != BookStatus.QUARANTINED and STATUS_ORDER[status] < current_order:
+                raise ValueError(
+                    f"cannot move book {book_id} from {current.status} back to {status}"
+                )
+            self._connection.execute(
+                """
             UPDATE books SET
                 status = ?,
                 archive_identifier = COALESCE(?, archive_identifier),
@@ -247,61 +260,64 @@ class StateStore:
                 error_detail = NULL,
                 updated_at = ?
             WHERE book_id = ?
-            """,
-            (
-                status,
-                archive_identifier,
-                str(artifact_path) if artifact_path else None,
-                artifact_sha256,
-                published_revision,
-                utc_now(),
-                book_id,
-            ),
-        )
-        self._connection.commit()
-        transitioned = self.get(book_id)
-        if transitioned is None:
-            raise RuntimeError(f"failed to transition book {book_id}")
-        return transitioned
+                """,
+                (
+                    status,
+                    archive_identifier,
+                    str(artifact_path) if artifact_path else None,
+                    artifact_sha256,
+                    published_revision,
+                    utc_now(),
+                    book_id,
+                ),
+            )
+            self._connection.commit()
+            transitioned = self.get(book_id)
+            if transitioned is None:
+                raise RuntimeError(f"failed to transition book {book_id}")
+            return transitioned
 
     def begin_attempt(self, book_id: int) -> BookCheckpoint:
-        if self.get(book_id) is None:
-            raise KeyError(f"book {book_id} has not been discovered")
-        now = utc_now()
-        self._connection.execute(
-            """
+        with self._lock:
+            if self.get(book_id) is None:
+                raise KeyError(f"book {book_id} has not been discovered")
+            now = utc_now()
+            self._connection.execute(
+                """
             UPDATE books SET
                 attempt_count = attempt_count + 1,
                 last_error = NULL,
                 last_started_at = ?,
                 updated_at = ?
             WHERE book_id = ?
-            """,
-            (now, now, book_id),
-        )
-        self._connection.commit()
-        started = self.get(book_id)
-        if started is None:
-            raise RuntimeError(f"failed to begin attempt for book {book_id}")
-        return started
+                """,
+                (now, now, book_id),
+            )
+            self._connection.commit()
+            started = self.get(book_id)
+            if started is None:
+                raise RuntimeError(f"failed to begin attempt for book {book_id}")
+            return started
 
     def record_failure(self, book_id: int, error: Exception) -> BookCheckpoint:
-        detail = f"{type(error).__name__}: {error}"[:4000]
-        self._connection.execute(
-            "UPDATE books SET last_error = ?, updated_at = ? WHERE book_id = ?",
-            (detail, utc_now(), book_id),
-        )
-        self._connection.commit()
-        failed = self.get(book_id)
-        if failed is None:
-            raise KeyError(f"book {book_id} has not been discovered")
-        return failed
+        with self._lock:
+            detail = f"{type(error).__name__}: {error}"[:4000]
+            self._connection.execute(
+                "UPDATE books SET last_error = ?, updated_at = ? WHERE book_id = ?",
+                (detail, utc_now(), book_id),
+            )
+            self._connection.commit()
+            failed = self.get(book_id)
+            if failed is None:
+                raise KeyError(f"book {book_id} has not been discovered")
+            return failed
 
     def restart(self, book_id: int) -> BookCheckpoint:
-        if self.get(book_id) is None:
-            raise KeyError(f"book {book_id} has not been discovered")
-        self._connection.execute(
-            """
+        with self._lock:
+            if self.get(book_id) is None:
+                raise KeyError(f"book {book_id} has not been discovered")
+            self._connection.execute(
+                """
             UPDATE books SET
                 status = ?,
                 archive_identifier = NULL,
@@ -313,18 +329,19 @@ class StateStore:
                 last_error = NULL,
                 updated_at = ?
             WHERE book_id = ?
-            """,
-            (BookStatus.DISCOVERED, utc_now(), book_id),
-        )
-        self._connection.commit()
-        restarted = self.get(book_id)
-        if restarted is None:
-            raise RuntimeError(f"failed to restart book {book_id}")
-        return restarted
+                """,
+                (BookStatus.DISCOVERED, utc_now(), book_id),
+            )
+            self._connection.commit()
+            restarted = self.get(book_id)
+            if restarted is None:
+                raise RuntimeError(f"failed to restart book {book_id}")
+            return restarted
 
     def quarantine(self, record: QuarantineRecord) -> BookCheckpoint:
-        self._connection.execute(
-            """
+        with self._lock:
+            self._connection.execute(
+                """
             INSERT INTO books (
                 book_id, source_fingerprint, status, archive_identifier,
                 error_code, error_detail, updated_at
@@ -340,39 +357,41 @@ class StateStore:
                 published_revision = NULL,
                 last_error = NULL,
                 updated_at = excluded.updated_at
-            """,
-            (
-                record.book_id,
-                record.source_fingerprint,
-                BookStatus.QUARANTINED,
-                record.archive_identifier,
-                record.code,
-                record.detail,
-                record.observed_at.isoformat(),
-            ),
-        )
-        self._connection.commit()
-        quarantined = self.get(record.book_id)
-        if quarantined is None:
-            raise RuntimeError(f"failed to quarantine book {record.book_id}")
-        return quarantined
+                """,
+                (
+                    record.book_id,
+                    record.source_fingerprint,
+                    BookStatus.QUARANTINED,
+                    record.archive_identifier,
+                    record.code,
+                    record.detail,
+                    record.observed_at.isoformat(),
+                ),
+            )
+            self._connection.commit()
+            quarantined = self.get(record.book_id)
+            if quarantined is None:
+                raise RuntimeError(f"failed to quarantine book {record.book_id}")
+            return quarantined
 
     def list(self, *statuses: BookStatus) -> tuple[BookCheckpoint, ...]:
-        if statuses:
-            placeholders = ", ".join("?" for _ in statuses)
-            rows = self._connection.execute(
-                f"SELECT * FROM books WHERE status IN ({placeholders}) ORDER BY book_id",
-                tuple(statuses),
-            ).fetchall()
-        else:
-            rows = self._connection.execute("SELECT * FROM books ORDER BY book_id").fetchall()
-        return tuple(checkpoint(row) for row in rows)
+        with self._lock:
+            if statuses:
+                placeholders = ", ".join("?" for _ in statuses)
+                rows = self._connection.execute(
+                    f"SELECT * FROM books WHERE status IN ({placeholders}) ORDER BY book_id",
+                    tuple(statuses),
+                ).fetchall()
+            else:
+                rows = self._connection.execute("SELECT * FROM books ORDER BY book_id").fetchall()
+            return tuple(checkpoint(row) for row in rows)
 
     def counts(self) -> dict[BookStatus, int]:
-        rows = self._connection.execute(
-            "SELECT status, COUNT(*) AS count FROM books GROUP BY status"
-        ).fetchall()
-        return {BookStatus(row["status"]): row["count"] for row in rows}
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT status, COUNT(*) AS count FROM books GROUP BY status"
+            ).fetchall()
+            return {BookStatus(row["status"]): row["count"] for row in rows}
 
     def _add_column(self, name: str, definition: str) -> None:
         columns = {

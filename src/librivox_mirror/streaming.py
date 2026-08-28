@@ -1,12 +1,52 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import contextmanager
 from queue import Full, Queue
 from threading import Event, Thread
 from typing import cast
 
 _COMPLETE = object()
+
+
+def ordered_parallel_map[Source, Result](
+    source: Iterable[Source],
+    function: Callable[[Source], Result],
+    *,
+    workers: int,
+    capacity: int,
+) -> Iterator[Result]:
+    if workers < 1:
+        raise ValueError("worker count must be positive")
+    if capacity < workers:
+        raise ValueError("capacity must be at least the worker count")
+
+    items = iter(source)
+    pending: deque[Future[Result]] = deque()
+    executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="book-preparer")
+    try:
+        for _ in range(capacity):
+            try:
+                item = next(items)
+            except StopIteration:
+                break
+            pending.append(executor.submit(function, item))
+
+        while pending:
+            result = pending.popleft().result()
+            try:
+                item = next(items)
+            except StopIteration:
+                pass
+            else:
+                pending.append(executor.submit(function, item))
+            yield result
+    finally:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 @contextmanager

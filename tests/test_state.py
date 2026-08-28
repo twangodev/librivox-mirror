@@ -1,4 +1,5 @@
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 
 import pytest
@@ -122,6 +123,28 @@ def test_state_uses_full_synchronous_wal_and_checkpoints_on_close(book: Book, tm
     assert synchronous == 2
     assert journal_mode == "wal"
     assert not path.with_name(f"{path.name}-wal").exists()
+
+
+def test_state_serializes_concurrent_book_updates(book: Book, tmp_path) -> None:
+    books = [book.model_copy(update={"id": book.id + offset}) for offset in range(8)]
+    with StateStore(tmp_path / "state.sqlite3") as state:
+
+        def prepare(candidate: Book) -> None:
+            state.discover(candidate)
+            state.begin_attempt(candidate.id)
+            state.transition(
+                candidate.id,
+                BookStatus.RESOLVED,
+                archive_identifier=f"book-{candidate.id}",
+            )
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            tuple(executor.map(prepare, books))
+
+        checkpoints = state.list(BookStatus.RESOLVED)
+
+    assert [checkpoint.book_id for checkpoint in checkpoints] == [item.id for item in books]
+    assert all(checkpoint.attempt_count == 1 for checkpoint in checkpoints)
 
 
 def test_run_lock_prevents_overlapping_writers(tmp_path) -> None:
