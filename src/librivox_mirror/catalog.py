@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Mapping
 from typing import Any
 
@@ -9,6 +10,7 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 from librivox_mirror.models import Author, Book, Genre, Reader, Section, canonical_metadata_json
 
 CATALOG_URL = "https://librivox.org/api/feed/audiobooks"
+logger = logging.getLogger(__name__)
 
 
 class BookNotFoundError(LookupError):
@@ -59,6 +61,8 @@ class LibriVoxCatalog:
     ) -> Iterator[Book]:
         offset = 0
         while True:
+            if offset == 0 or offset % 1000 == 0:
+                logger.info("Scanning LibriVox catalog at offset %s", offset)
             params: dict[str, str | int] = {
                 "extended": 1,
                 "limit": page_size,

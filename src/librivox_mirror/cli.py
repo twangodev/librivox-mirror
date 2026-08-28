@@ -4,7 +4,7 @@ import logging
 import time
 from collections.abc import Iterable, Sequence, Sized
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import batched, islice
 from pathlib import Path
 from typing import Annotated, cast
@@ -12,7 +12,17 @@ from typing import Annotated, cast
 import typer
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.progress import (
+    BarColumn,
+    DownloadColumn,
+    Progress,
+    SpinnerColumn,
+    TaskID,
+    TaskProgressColumn,
+    TextColumn,
+    TimeRemainingColumn,
+    TransferSpeedColumn,
+)
 
 from librivox_mirror import __version__
 from librivox_mirror.archive import MAX_DOWNLOAD_JOBS, InternetArchiveClient, QuarantinedBookError
@@ -22,7 +32,7 @@ from librivox_mirror.hub import HubPublisher
 from librivox_mirror.models import Book, BookStatus, SyncState, canonical_metadata_json
 from librivox_mirror.state import RunLock, StateStore
 from librivox_mirror.streaming import prefetch
-from librivox_mirror.workflow import BookOutcome, MirrorRunner
+from librivox_mirror.workflow import BookOutcome, BookProgress, MirrorRunner
 
 DEFAULT_STATE = Path(".librivox-mirror/state.sqlite3")
 DEFAULT_STAGING = Path(".librivox-mirror/staging")
@@ -48,6 +58,50 @@ class AppSettings:
     errors: Console
 
 
+@dataclass
+class TerminalBookProgress:
+    progress: Progress
+    task_id: TaskID
+    description: str
+    heartbeat: LoggingBookProgress
+
+    def stage(self, stage: str) -> None:
+        self.progress.update(self.task_id, description=f"{self.description} · {stage}")
+
+    def download(self, completed_bytes: int, total_bytes: int) -> None:
+        self.progress.update(self.task_id, completed=completed_bytes, total=total_bytes)
+        self.heartbeat.download(completed_bytes, total_bytes)
+
+
+@dataclass
+class LoggingBookProgress:
+    book_id: int
+    interval_seconds: float = 10
+    started_at: float | None = field(default=None, init=False)
+    last_reported_at: float = field(default=0, init=False)
+
+    def stage(self, stage: str) -> None:
+        return
+
+    def download(self, completed_bytes: int, total_bytes: int) -> None:
+        now = time.monotonic()
+        if self.started_at is None:
+            self.started_at = now
+        if completed_bytes < total_bytes and now - self.last_reported_at < self.interval_seconds:
+            return
+        elapsed = max(now - self.started_at, 0.001)
+        percent = completed_bytes / total_bytes * 100 if total_bytes else 100
+        logger.info(
+            "Book %s download: %.1f/%.1f MiB (%.1f%%, %.1f MiB/s)",
+            self.book_id,
+            completed_bytes / 1024**2,
+            total_bytes / 1024**2,
+            percent,
+            completed_bytes / 1024**2 / elapsed,
+        )
+        self.last_reported_at = now
+
+
 @app.callback()
 def root(
     context: typer.Context,
@@ -59,22 +113,42 @@ def root(
         bool,
         typer.Option("--verbose", "-v", help="Include debug logs and source paths."),
     ] = False,
+    log_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--log-file",
+            dir_okay=False,
+            help="Append plain-text logs to a file.",
+            envvar="LIBRIVOX_MIRROR_LOG_FILE",
+        ),
+    ] = None,
 ) -> None:
     """Build and maintain an ML-ready Hugging Face mirror of LibriVox."""
     output = Console(no_color=json_output)
     errors = Console(stderr=True, no_color=json_output)
+    handlers: list[logging.Handler] = [
+        RichHandler(
+            console=errors,
+            markup=False,
+            rich_tracebacks=errors.is_terminal,
+            show_path=verbose,
+            show_time=False,
+        )
+    ]
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S%z",
+            )
+        )
+        handlers.append(file_handler)
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(message)s",
-        handlers=[
-            RichHandler(
-                console=errors,
-                markup=False,
-                rich_tracebacks=errors.is_terminal,
-                show_path=verbose,
-                show_time=False,
-            )
-        ],
+        handlers=handlers,
         force=True,
     )
     for logger_name in ("httpcore", "httpx", "huggingface_hub", "internetarchive", "urllib3"):
@@ -286,7 +360,7 @@ def mirror(
                 jobs=jobs,
                 publisher=publisher,
             )
-            outcome = runner.prepare_book(book)
+            outcome = prepare_books(context, runner, [book], resilient=False)[0]
             sync_state = publisher.load_sync_state() if publisher else SyncState()
             result = runner.publish(
                 [outcome],
@@ -596,21 +670,40 @@ def prepare_books(
     context: typer.Context,
     runner: MirrorRunner,
     books: Sequence[Book],
+    *,
+    resilient: bool = True,
 ) -> list[BookOutcome]:
     settings = app_settings(context)
     outcomes = []
+    interactive = settings.errors.is_terminal and not settings.json_output
     with Progress(
         SpinnerColumn(),
         TextColumn("{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        DownloadColumn(binary_units=True),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
         console=settings.errors,
-        disable=not settings.errors.is_terminal,
+        disable=not interactive,
         transient=True,
     ) as progress:
-        task = progress.add_task("Preparing books", total=len(books))
-        for book in books:
-            progress.update(task, description=f"Preparing book {book.id}")
-            outcomes.append(runner.prepare_book_resiliently(book))
-            progress.advance(task)
+        for index, book in enumerate(books, start=1):
+            description = f"[{index}/{len(books)}] Book {book.id}"
+            task_id = progress.add_task(f"{description} · queued", total=None)
+            book_progress: BookProgress
+            if interactive:
+                book_progress = TerminalBookProgress(
+                    progress,
+                    task_id,
+                    description,
+                    LoggingBookProgress(book.id),
+                )
+            else:
+                book_progress = LoggingBookProgress(book.id)
+            prepare = runner.prepare_book_resiliently if resilient else runner.prepare_book
+            outcomes.append(prepare(book, progress=book_progress))
+            progress.remove_task(task_id)
     return outcomes
 
 
