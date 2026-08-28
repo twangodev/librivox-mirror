@@ -72,16 +72,10 @@ class LibriVoxCatalog:
     ) -> Iterator[Book]:
         offset = 0
         if start_id is not None:
-            offset, first_book_id = self._seek(start_id, since=since)
-            if first_book_id is None:
+            seek_offset = self._seek(start_id, since=since)
+            if seek_offset is None:
                 return
-            first_book = self.get_book(first_book_id)
-            if end_id is not None and first_book.id > end_id:
-                return
-            yield first_book
-            if end_id is not None and first_book.id == end_id:
-                return
-            offset += 1
+            offset = seek_offset
         first_page = True
         while True:
             if first_page or offset % 1000 == 0:
@@ -107,26 +101,41 @@ class LibriVoxCatalog:
                 return
             offset += page_size
 
-    def _seek(self, start_id: int, *, since: int | None) -> tuple[int, int | None]:
+    def _seek(self, start_id: int, *, since: int | None) -> int | None:
         logger.info("Seeking LibriVox catalog to book %s", start_id)
-        params: dict[str, str | int] = {
-            "fields": "{id}",
-            "limit": max(1, start_id),
-            "offset": 0,
-        }
-        if since is not None:
-            params["since"] = since
-        rows = self._request(params).get("books") or []
-        offset = len(rows)
-        book_id = None
-        for index, row in enumerate(rows):
-            candidate_id = _required_int(row.get("id"), "book id")
-            if candidate_id >= start_id:
-                offset = index
-                book_id = candidate_id
-                break
-        logger.info("Positioned LibriVox catalog at offset %s", offset)
-        return offset, book_id
+        lower_offset = 0
+        upper_offset = max(0, start_id - 1)
+        matching_offset = None
+        probes = 0
+        while lower_offset <= upper_offset:
+            offset = (lower_offset + upper_offset) // 2
+            params: dict[str, str | int] = {
+                "fields": "{id}",
+                "limit": 1,
+                "offset": offset,
+            }
+            if since is not None:
+                params["since"] = since
+            rows = self._request(params).get("books") or []
+            probes += 1
+            if not rows:
+                upper_offset = offset - 1
+                continue
+            candidate_id = _required_int(rows[0].get("id"), "book id")
+            if candidate_id < start_id:
+                lower_offset = offset + 1
+                continue
+            matching_offset = offset
+            upper_offset = offset - 1
+        if matching_offset is None:
+            logger.info("No LibriVox books found at or after book %s", start_id)
+            return None
+        logger.info(
+            "Positioned LibriVox catalog at offset %s after %s probes",
+            matching_offset,
+            probes,
+        )
+        return matching_offset
 
     def _request(self, params: Mapping[str, str | int]) -> dict[str, Any]:
         retrying = Retrying(
