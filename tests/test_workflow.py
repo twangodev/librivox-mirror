@@ -9,6 +9,7 @@ from librivox_mirror.archive import (
     QuarantinedBookError,
     resolve_original_files,
 )
+from librivox_mirror.artifact import ArtifactBuildError
 from librivox_mirror.capacity import StagingCapacity
 from librivox_mirror.catalog import LibriVoxCatalog
 from librivox_mirror.models import (
@@ -360,6 +361,33 @@ def test_resilient_preparation_defers_source_failures(book: Book, tmp_path) -> N
     assert outcome.error == "SourceUnavailableError: archive edge unavailable"
     assert checkpoint is not None
     assert checkpoint.last_error == outcome.error
+
+
+def test_resilient_preparation_retries_artifact_build_failures(
+    book: Book, tmp_path, monkeypatch
+) -> None:
+    from librivox_mirror.artifact import build_artifact
+
+    attempts = 0
+
+    def build_with_transient_failure(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ArtifactBuildError("unexpected end of data")
+        return build_artifact(*args, **kwargs)
+
+    monkeypatch.setattr("librivox_mirror.workflow.build_artifact", build_with_transient_failure)
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        outcome = make_runner(
+            book, PreparedArchive(book, tmp_path), tmp_path, state
+        ).prepare_book_resiliently(book)
+        checkpoint = state.get(book.id)
+
+    assert outcome.artifact is not None
+    assert attempts == 2
+    assert checkpoint is not None
+    assert checkpoint.attempt_count == 2
 
 
 def test_publish_retries_transient_hub_failures(book: Book, tmp_path, monkeypatch) -> None:

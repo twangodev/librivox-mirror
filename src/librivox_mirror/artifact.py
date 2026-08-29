@@ -29,6 +29,10 @@ class InvalidArtifactError(ValueError):
     pass
 
 
+class ArtifactBuildError(OSError):
+    pass
+
+
 class _ProgressReader:
     def __init__(self, source: BinaryIO, advance: Callable[[int], None]) -> None:
         self._source = source
@@ -89,21 +93,28 @@ def build_artifact(
     destination = artifact_path(root, resolved.book.id)
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(".tar.partial")
-    with tarfile.open(partial, mode="w", format=tarfile.USTAR_FORMAT) as archive:
-        for download in ordered:
-            key = download.resolved.section.sample_key
-            add_path(
-                archive,
-                f"{key}.mp3",
-                download.path,
-                advance=advance if progress is not None else None,
-            )
-            metadata = section_metadata(resolved, download)
-            add_bytes(archive, f"{key}.json", canonical_json(metadata))
-    sync_file(partial)
-    partial.replace(destination)
-    sync_directory(destination.parent)
-    sha256 = file_sha256(destination)
+    try:
+        with tarfile.open(partial, mode="w", format=tarfile.USTAR_FORMAT) as archive:
+            for download in ordered:
+                key = download.resolved.section.sample_key
+                add_path(
+                    archive,
+                    f"{key}.mp3",
+                    download.path,
+                    advance=advance if progress is not None else None,
+                )
+                metadata = section_metadata(resolved, download)
+                add_bytes(archive, f"{key}.json", canonical_json(metadata))
+        sync_file(partial)
+        partial.replace(destination)
+        sync_directory(destination.parent)
+        sha256 = file_sha256(destination)
+    except OSError as error:
+        partial.unlink(missing_ok=True)
+        destination.unlink(missing_ok=True)
+        raise ArtifactBuildError(
+            f"could not build artifact for book {resolved.book.id}: {error}"
+        ) from error
     return BookArtifact(
         book=resolved.book,
         archive_identifier=resolved.archive_identifier,

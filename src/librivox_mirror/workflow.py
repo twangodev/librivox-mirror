@@ -13,6 +13,7 @@ from librivox_mirror.archive import (
     SourceUnavailableError,
 )
 from librivox_mirror.artifact import (
+    ArtifactBuildError,
     InvalidArtifactError,
     InvalidAudioError,
     artifact_manifest_path,
@@ -30,6 +31,7 @@ from librivox_mirror.network import is_transient_http_error
 from librivox_mirror.state import BookCheckpoint, StateStore
 
 PUBLISH_MAX_RETRY_DELAY = 300
+ARTIFACT_BUILD_ATTEMPTS = 3
 TAR_STAGING_OVERHEAD_PER_SECTION = 64 * 1024
 logger = logging.getLogger(__name__)
 
@@ -96,15 +98,35 @@ class MirrorRunner:
         *,
         progress: BookProgress | None = None,
     ) -> BookOutcome:
-        try:
-            return self.prepare_book(book, progress=progress)
-        except (SourceUnavailableError, InvalidAudioError) as error:
-            self.cleanup_downloads(book.id)
-            if self.staging_capacity is not None:
-                self.staging_capacity.release(book.id)
-            detail = f"{type(error).__name__}: {error}"
-            logger.error("Deferred book %s after a source failure: %s", book.id, detail)
-            return BookOutcome(book=book, error=detail)
+        for attempt in range(1, ARTIFACT_BUILD_ATTEMPTS + 1):
+            try:
+                return self.prepare_book(book, progress=progress)
+            except ArtifactBuildError as error:
+                self.cleanup_downloads(book.id)
+                if self.staging_capacity is not None:
+                    self.staging_capacity.release(book.id)
+                if attempt < ARTIFACT_BUILD_ATTEMPTS:
+                    logger.warning(
+                        "Retrying book %s after artifact build attempt %s/%s failed: %s",
+                        book.id,
+                        attempt,
+                        ARTIFACT_BUILD_ATTEMPTS,
+                        error,
+                    )
+                    continue
+                detail = f"{type(error).__name__}: {error}"
+                logger.error(
+                    "Deferred book %s after repeated packing failures: %s", book.id, detail
+                )
+                return BookOutcome(book=book, error=detail)
+            except (SourceUnavailableError, InvalidAudioError) as error:
+                self.cleanup_downloads(book.id)
+                if self.staging_capacity is not None:
+                    self.staging_capacity.release(book.id)
+                detail = f"{type(error).__name__}: {error}"
+                logger.error("Deferred book %s after a source failure: %s", book.id, detail)
+                return BookOutcome(book=book, error=detail)
+        raise AssertionError("artifact build retry loop terminated unexpectedly")
 
     def _prepare_book(
         self,
