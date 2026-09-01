@@ -4,6 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/librivox-mirror?style=flat&logo=pypi&logoColor=white)](https://pypi.org/project/librivox-mirror/)
 [![Mirrored books](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2Ftwangodev%2Flibrivox-mirror%2Fresolve%2Fmain%2Fstate%2Fsync.json&query=%24.published_books&label=books&style=flat&logo=bookstack&logoColor=white&color=FFD21E&cacheSeconds=300)](https://huggingface.co/datasets/twangodev/librivox-mirror)
 [![Audio hours](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2Ftwangodev%2Flibrivox-mirror%2Fresolve%2Fmain%2Fstate%2Fsync.json&query=%24.audio_hours&suffix=%20hours&label=audio&style=flat&logo=audacity&logoColor=white&color=FFD21E&cacheSeconds=300)](https://huggingface.co/datasets/twangodev/librivox-mirror)
+[![Last updated](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fhuggingface.co%2Fdatasets%2Ftwangodev%2Flibrivox-mirror%2Fresolve%2Fmain%2Fstate%2Fsync.json&query=%24.updated_at&label=updated&style=flat&logo=huggingface&logoColor=white&color=0969DA&cacheSeconds=300)](https://huggingface.co/datasets/twangodev/librivox-mirror)
 
 Fast, structured, continuously updated LibriVox audio mirror.
 
