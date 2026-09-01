@@ -39,10 +39,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       MAX_BOOKS: ${{ inputs.max_books || 20 }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: 0.12.5
           enable-cache: true
@@ -65,10 +65,10 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       MAX_BOOKS: ${{ inputs.max_books || 20 }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - uses: astral-sh/setup-uv@v10.0.1
         with:
           version: 0.12.5
           enable-cache: true
