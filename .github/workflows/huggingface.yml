@@ -30,10 +30,9 @@ concurrency:
 jobs:
   sync:
     name: Publish daily changes
-    if: >-
-      vars.HF_DATASET_REPO != '' &&
-      (github.event.schedule == '17 8 * * *' || inputs.operation == 'sync')
+    if: github.event.schedule == '17 8 * * *' || inputs.operation == 'sync'
     runs-on: ubuntu-latest
+    environment: huggingface
     timeout-minutes: 330
     env:
       HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
@@ -50,25 +49,16 @@ jobs:
           cache-dependency-glob: uv.lock
       - id: install
         run: uv sync --locked --no-group dev --no-group integration
-      - run: >-
-          uv run librivox-mirror sync
-          --max-books "$MAX_BOOKS"
-          --commit-size 1
-          --jobs 2
-          --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
-          --staging "$RUNNER_TEMP/librivox-mirror/staging"
+      - run: uv run librivox-mirror sync --max-books "$MAX_BOOKS"
       - name: Report checkpoint status
         if: always() && steps.install.outcome == 'success'
-        run: >-
-          uv run librivox-mirror status
-          --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
+        run: uv run librivox-mirror status
 
   reconcile:
     name: Reconcile changed books
-    if: >-
-      vars.HF_DATASET_REPO != '' &&
-      (github.event.schedule == '43 9 1 * *' || inputs.operation == 'reconcile')
+    if: github.event.schedule == '43 9 1 * *' || inputs.operation == 'reconcile'
     runs-on: ubuntu-latest
+    environment: huggingface
     timeout-minutes: 330
     env:
       HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
@@ -85,15 +75,7 @@ jobs:
           cache-dependency-glob: uv.lock
       - id: install
         run: uv sync --locked --no-group dev --no-group integration
-      - run: >-
-          uv run librivox-mirror reconcile
-          --max-books "$MAX_BOOKS"
-          --commit-size 1
-          --jobs 2
-          --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
-          --staging "$RUNNER_TEMP/librivox-mirror/staging"
+      - run: uv run librivox-mirror reconcile --max-books "$MAX_BOOKS" --jobs 2
       - name: Report checkpoint status
         if: always() && steps.install.outcome == 'success'
-        run: >-
-          uv run librivox-mirror status
-          --state "$RUNNER_TEMP/librivox-mirror/state.sqlite3"
+        run: uv run librivox-mirror status
