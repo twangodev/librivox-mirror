@@ -279,6 +279,8 @@ def test_quarantine_replaces_current_artifact_and_metadata(book: Book, tmp_path)
         tmp_path / "hub/metadata/metadata/quarantine/000.parquet"
     ).to_pylist()
     assert quarantine[0]["code"] == "original_file_missing"
+    assert publisher.has_current_book(book)
+    assert not publisher.has_current_book(book, include_quarantined=False)
     card = DatasetCard((tmp_path / "hub/metadata/README.md").read_text()).data.to_dict()
     configs = {config["config_name"]: config for config in card["configs"]}
     assert set(configs) == {"books", "sections"}

@@ -458,6 +458,10 @@ def backfill(
     ] = DEFAULT_STAGING_LIMIT_GIB,
     max_books: Annotated[int | None, typer.Option(min=1)] = None,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 20,
+    retry_quarantined: Annotated[
+        bool,
+        typer.Option(help="Retry matching books currently quarantined on Hugging Face."),
+    ] = False,
     dry_run: Annotated[bool, typer.Option()] = False,
     user_agent: Annotated[
         str,
@@ -511,6 +515,7 @@ def backfill(
                 publisher=publisher,
                 source_index=source_index,
                 staging_capacity=staging_capacity,
+                retry_quarantined=retry_quarantined,
             )
             logger.info(
                 "Streaming LibriVox catalog books %s-%s into %s-book commits with "

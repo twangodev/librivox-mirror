@@ -115,6 +115,11 @@ class FakePublisher:
         return SyncState()
 
 
+class QuarantinedPublisher(FakePublisher):
+    def has_current_book(self, book: Book, *, include_quarantined: bool = True) -> bool:
+        return include_quarantined
+
+
 class TransientPublisher(FakePublisher):
     def __init__(self) -> None:
         super().__init__()
@@ -159,6 +164,7 @@ def make_runner(
     *,
     publisher=None,
     staging_capacity=None,
+    retry_quarantined=False,
 ) -> MirrorRunner:
     return MirrorRunner(
         catalog=cast(LibriVoxCatalog, None),
@@ -168,6 +174,7 @@ def make_runner(
         publisher=publisher,
         source_index=publisher,
         staging_capacity=staging_capacity,
+        retry_quarantined=retry_quarantined,
     )
 
 
@@ -292,6 +299,22 @@ def test_current_hub_book_cleans_local_checkpoint_without_source_requests(
     assert checkpoint is not None
     assert checkpoint.status == BookStatus.PUBLISHED
     assert not artifact.exists()
+
+
+def test_retry_quarantined_reprocesses_a_current_quarantine(book: Book, tmp_path) -> None:
+    publisher = QuarantinedPublisher()
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        outcome = make_runner(
+            book,
+            PreparedArchive(book, tmp_path),
+            tmp_path,
+            state,
+            publisher=publisher,
+            retry_quarantined=True,
+        ).prepare_book(book)
+
+    assert outcome.artifact is not None
+    assert not outcome.skipped
 
 
 def test_publish_removes_packed_checkpoint_files(book: Book, tmp_path) -> None:

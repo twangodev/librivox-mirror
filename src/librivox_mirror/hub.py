@@ -261,7 +261,7 @@ class HubPublisher:
         sections = [row for path in section_paths for row in self._load_rows(path)]
         return audio_seconds_by_language(sections)
 
-    def has_current_book(self, book: Book) -> bool:
+    def has_current_book(self, book: Book, *, include_quarantined: bool = True) -> bool:
         bucket = book.metadata_bucket
         books = self._load_rows(metadata_path("books", bucket))
         if any(
@@ -269,6 +269,8 @@ class HubPublisher:
             for row in books
         ):
             return True
+        if not include_quarantined:
+            return False
         quarantined = self._load_rows(metadata_path("quarantine", bucket))
         return any(
             row["book_id"] == book.id and row["source_fingerprint"] == book.source_fingerprint
