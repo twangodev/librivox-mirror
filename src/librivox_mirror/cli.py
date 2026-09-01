@@ -31,7 +31,13 @@ from librivox_mirror.artifact import verify_artifact
 from librivox_mirror.capacity import StagingCapacity
 from librivox_mirror.catalog import BookNotFoundError, LibriVoxCatalog
 from librivox_mirror.hub import HubPublisher
-from librivox_mirror.models import Book, BookStatus, SyncState, canonical_metadata_json
+from librivox_mirror.models import (
+    Book,
+    BookStatus,
+    QuarantineCode,
+    SyncState,
+    canonical_metadata_json,
+)
 from librivox_mirror.state import RunLock, StateStore
 from librivox_mirror.streaming import ordered_parallel_map, prefetch
 from librivox_mirror.workflow import BookOutcome, BookProgress, MirrorRunner
@@ -43,6 +49,12 @@ MINIMUM_FREE_GIB = 10
 DEFAULT_USER_AGENT = (
     f"librivox-mirror/{__version__} "
     "(ML dataset mirroring; https://pypi.org/project/librivox-mirror/)"
+)
+REPAIRABLE_QUARANTINE_CODES = frozenset(
+    {
+        QuarantineCode.ARCHIVE_ITEM_MISSING,
+        QuarantineCode.ORIGINAL_FILE_MISSING,
+    }
 )
 logger = logging.getLogger(__name__)
 
@@ -458,10 +470,6 @@ def backfill(
     ] = DEFAULT_STAGING_LIMIT_GIB,
     max_books: Annotated[int | None, typer.Option(min=1)] = None,
     commit_size: Annotated[int, typer.Option(min=1, max=20)] = 20,
-    retry_quarantined: Annotated[
-        bool,
-        typer.Option(help="Retry matching books currently quarantined on Hugging Face."),
-    ] = False,
     dry_run: Annotated[bool, typer.Option()] = False,
     user_agent: Annotated[
         str,
@@ -515,7 +523,6 @@ def backfill(
                 publisher=publisher,
                 source_index=source_index,
                 staging_capacity=staging_capacity,
-                retry_quarantined=retry_quarantined,
             )
             logger.info(
                 "Streaming LibriVox catalog books %s-%s into %s-book commits with "
@@ -543,6 +550,129 @@ def backfill(
         context,
         {"outcomes": outcomes, "revisions": revisions},
         f"Processed {len(outcomes)} books in {len(revisions)} Hub commits",
+    )
+
+
+@app.command()
+def repair(
+    context: typer.Context,
+    repo: Annotated[
+        str,
+        typer.Option(help="Hugging Face dataset repository.", envvar="HF_DATASET_REPO"),
+    ],
+    token: Annotated[
+        str | None,
+        typer.Option(help="Hugging Face token.", envvar="HF_TOKEN", show_default=False),
+    ] = None,
+    state_path: Annotated[Path, typer.Option("--state")] = DEFAULT_STATE,
+    staging: Annotated[Path, typer.Option()] = DEFAULT_STAGING,
+    download_jobs: Annotated[
+        int,
+        typer.Option(
+            "--download-jobs",
+            "--jobs",
+            min=1,
+            help="Maximum concurrent MP3 downloads across all books.",
+        ),
+    ] = 4,
+    book_jobs: Annotated[
+        int,
+        typer.Option(min=1, help="Books prepared concurrently."),
+    ] = 2,
+    upload_jobs: Annotated[
+        int,
+        typer.Option(min=1, help="Concurrent Hub upload workers."),
+    ] = 8,
+    request_delay: Annotated[
+        float,
+        typer.Option(
+            min=0,
+            help="Minimum seconds between Internet Archive metadata request starts.",
+        ),
+    ] = 1,
+    staging_limit_gib: Annotated[
+        int,
+        typer.Option(min=1, help="Maximum in-flight staging reservation in GiB."),
+    ] = DEFAULT_STAGING_LIMIT_GIB,
+    max_books: Annotated[int | None, typer.Option(min=1)] = None,
+    commit_size: Annotated[int, typer.Option(min=1, max=20)] = 20,
+    dry_run: Annotated[bool, typer.Option()] = False,
+    user_agent: Annotated[
+        str,
+        typer.Option(envvar="LIBRIVOX_MIRROR_USER_AGENT"),
+    ] = DEFAULT_USER_AGENT,
+) -> None:
+    """Retry actionable Hugging Face quarantine records."""
+    publisher = HubPublisher(
+        repo,
+        token=token,
+        working_directory=staging / "hub",
+        upload_jobs=upload_jobs,
+    )
+    books = publisher.quarantined_books(codes=REPAIRABLE_QUARANTINE_CODES)
+    if max_books is not None:
+        books = books[:max_books]
+    if dry_run or not books:
+        emit(
+            context,
+            {"books": [book_summary(book) for book in books], "count": len(books)},
+            f"{'Would repair' if dry_run else 'Found'} {len(books)} quarantined books",
+        )
+        return
+    source_index = HubPublisher(
+        repo,
+        token=token,
+        working_directory=staging / "hub-reader",
+    )
+    staging_capacity = StagingCapacity(
+        staging,
+        max_bytes=staging_limit_gib * 1024**3,
+        minimum_free_bytes=MINIMUM_FREE_GIB * 1024**3,
+    )
+    with (
+        LibriVoxCatalog(user_agent=user_agent) as catalog,
+        InternetArchiveClient(
+            user_agent=user_agent,
+            request_delay=request_delay,
+            download_jobs=download_jobs,
+        ) as archive,
+        RunLock(state_path),
+        StateStore(state_path) as state,
+    ):
+        runner = MirrorRunner(
+            catalog=catalog,
+            archive=archive,
+            state=state,
+            staging_directory=staging,
+            publisher=publisher,
+            source_index=source_index,
+            staging_capacity=staging_capacity,
+            retry_quarantined=True,
+        )
+        logger.info(
+            "Repairing %s quarantined books in %s-book commits with %s book workers, "
+            "%s total download workers, %s upload workers, %ss metadata request spacing, "
+            "and a %s GiB staging limit",
+            len(books),
+            commit_size,
+            book_jobs,
+            download_jobs,
+            upload_jobs,
+            request_delay,
+            staging_limit_gib,
+        )
+        outcomes, revisions = publish_batches(
+            context,
+            runner,
+            books,
+            publisher.load_sync_state(),
+            commit_size,
+            book_jobs=book_jobs,
+        )
+    emit(
+        context,
+        {"outcomes": outcomes, "revisions": revisions},
+        f"Repaired {len(outcomes)} quarantined books in {len(revisions)} Hub commits",
     )
 
 

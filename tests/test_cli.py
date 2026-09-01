@@ -46,7 +46,16 @@ def test_help_names_the_command() -> None:
     assert result.exit_code == 0
     output = unstyle(result.stdout)
     assert "librivox-mirror" in output
-    for command in ("plan", "mirror", "backfill", "sync", "reconcile", "status", "verify"):
+    for command in (
+        "plan",
+        "mirror",
+        "backfill",
+        "repair",
+        "sync",
+        "reconcile",
+        "status",
+        "verify",
+    ):
         assert command in output
 
 

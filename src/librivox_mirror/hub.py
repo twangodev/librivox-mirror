@@ -4,6 +4,7 @@ import json
 import shutil
 import tarfile
 from collections import Counter
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -27,9 +28,11 @@ from huggingface_hub.errors import (
     RepositoryNotFoundError,
 )
 
+from librivox_mirror.catalog import parse_book
 from librivox_mirror.models import (
     Book,
     BookArtifact,
+    QuarantineCode,
     QuarantineRecord,
     SyncState,
 )
@@ -250,6 +253,28 @@ class HubPublisher:
         if state.schema_version < 3:
             state = state.model_copy(update={"schema_version": 3})
         return state
+
+    def quarantined_books(
+        self,
+        *,
+        codes: Collection[QuarantineCode] | None = None,
+    ) -> list[Book]:
+        selected_codes = {str(code) for code in codes} if codes is not None else None
+        paths = sorted(
+            path
+            for path in self.api.list_repo_files(self.repo_id, repo_type="dataset")
+            if path.startswith("metadata/quarantine/") and path.endswith(".parquet")
+        )
+        books = []
+        for row in (row for path in paths for row in self._load_rows(path)):
+            if selected_codes is not None and str(row["code"]) not in selected_codes:
+                continue
+            metadata = row["librivox_metadata"]
+            payload = json.loads(metadata) if isinstance(metadata, str) else metadata
+            if not isinstance(payload, Mapping):
+                raise ValueError(f"book {row['book_id']} has invalid LibriVox metadata")
+            books.append(parse_book(payload))
+        return sorted(books, key=lambda book: book.id)
 
     def _load_audio_seconds_by_language(self) -> dict[str, int]:
         paths = self.api.list_repo_files(self.repo_id, repo_type="dataset")
