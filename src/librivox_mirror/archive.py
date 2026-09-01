@@ -61,8 +61,12 @@ class InvalidMetadataResponseError(ValueError):
     pass
 
 
+class ArchiveItemMissingError(LookupError):
+    pass
+
+
 def is_retryable_metadata_error(error: BaseException) -> bool:
-    return isinstance(error, InvalidMetadataResponseError) or (
+    return isinstance(error, (ArchiveItemMissingError, InvalidMetadataResponseError)) or (
         isinstance(error, Exception) and is_transient_http_error(error)
     )
 
@@ -205,37 +209,42 @@ class InternetArchiveClient:
         self.close()
 
     def resolve_book(self, book: Book) -> ResolvedBook:
-        identifier = archive_identifier(book.url_iarchive)
-        if identifier is None:
+        identifiers = archive_identifiers(book)
+        if not identifiers:
             raise quarantine(
                 book,
                 QuarantineCode.ARCHIVE_IDENTIFIER_MISSING,
                 f"could not parse an Internet Archive identifier from {book.url_iarchive!r}",
             )
-        try:
-            payload = self._get_metadata(identifier)
-        except (httpx.HTTPError, InvalidMetadataResponseError) as error:
-            raise SourceUnavailableError(
-                f"could not load Internet Archive item {identifier!r}: {error}"
-            ) from error
-        if not payload:
-            raise quarantine(
-                book,
-                QuarantineCode.ARCHIVE_ITEM_MISSING,
-                f"Internet Archive item {identifier!r} does not exist",
-                identifier,
-            )
-        files = payload.get("files")
-        metadata = payload.get("metadata")
-        if not isinstance(files, list) or not all(isinstance(row, Mapping) for row in files):
-            raise SourceUnavailableError(
-                f"Internet Archive item {identifier!r} returned invalid file metadata"
-            )
-        if not isinstance(metadata, Mapping):
-            raise SourceUnavailableError(
-                f"Internet Archive item {identifier!r} returned invalid item metadata"
-            )
-        return resolve_original_files(book, identifier, files, metadata)
+        missing = []
+        for identifier in identifiers:
+            try:
+                payload = self._get_metadata(identifier)
+            except ArchiveItemMissingError:
+                missing.append(identifier)
+                continue
+            except (httpx.HTTPError, InvalidMetadataResponseError) as error:
+                raise SourceUnavailableError(
+                    f"could not load Internet Archive item {identifier!r}: {error}"
+                ) from error
+            files = payload.get("files")
+            metadata = payload.get("metadata")
+            if not isinstance(files, list) or not all(isinstance(row, Mapping) for row in files):
+                raise SourceUnavailableError(
+                    f"Internet Archive item {identifier!r} returned invalid file metadata"
+                )
+            if not isinstance(metadata, Mapping):
+                raise SourceUnavailableError(
+                    f"Internet Archive item {identifier!r} returned invalid item metadata"
+                )
+            return resolve_original_files(book, identifier, files, metadata)
+        identifiers_text = ", ".join(repr(identifier) for identifier in missing)
+        raise quarantine(
+            book,
+            QuarantineCode.ARCHIVE_ITEM_MISSING,
+            f"Internet Archive item(s) {identifiers_text} do not exist",
+            missing[0],
+        )
 
     def download_book(
         self,
@@ -346,6 +355,8 @@ class InternetArchiveClient:
             raise InvalidMetadataResponseError("response was not valid JSON") from error
         if not isinstance(payload, Mapping):
             raise InvalidMetadataResponseError("response was not a JSON object")
+        if not payload or payload.get("is_dark") is True:
+            raise ArchiveItemMissingError(f"Internet Archive item {identifier!r} is missing")
         return payload
 
     def _download_once(
@@ -388,11 +399,20 @@ def archive_identifier(url: str) -> str | None:
     if not path:
         return None
     parts = path.split("/")
-    for marker in ("details", "download", "metadata"):
+    for marker in ("details", "download", "metadata", "compress"):
         if marker in parts:
             index = parts.index(marker)
             return parts[index + 1] if len(parts) > index + 1 else None
     return parts[-1]
+
+
+def archive_identifiers(book: Book) -> tuple[str, ...]:
+    urls = [book.url_iarchive, book.url_zip_file or ""]
+    if book.url_librivox:
+        urls.extend(section.listen_url for section in book.sections)
+    return tuple(
+        dict.fromkeys(identifier for url in urls if (identifier := archive_identifier(url)))
+    )
 
 
 def resolve_original_files(
@@ -446,26 +466,56 @@ def original_candidates(
     originals: Mapping[str, ArchiveFile],
 ) -> set[str]:
     listened_name = Path(unquote(urlparse(section.listen_url).path)).name
-    listened = indexed.get(listened_name)
-    derived_from = str(listened.get("original")) if listened and listened.get("original") else None
-    if derived_from is not None and derived_from in originals:
-        return {derived_from}
-    if listened_name in originals:
-        return {listened_name}
-    canonical = canonical_audio_name(listened_name)
-    return {name for name in originals if canonical_audio_name(name) == canonical}
+    listened_candidates = candidates_for_name(listened_name, indexed, originals)
+    if listened_candidates:
+        return listened_candidates
+    return candidates_for_name(section.file_name or "", indexed, originals)
+
+
+def candidates_for_name(
+    name: str,
+    indexed: Mapping[str, Mapping[str, Any]],
+    originals: Mapping[str, ArchiveFile],
+) -> set[str]:
+    if not name:
+        return set()
+    stripped_name = name.strip()
+    referenced = indexed.get(name) or indexed.get(stripped_name)
+    if referenced and referenced.get("original"):
+        original_name = str(referenced["original"])
+        for candidate in (original_name, original_name.strip()):
+            if candidate in originals:
+                return {candidate}
+    for candidate in (name, stripped_name):
+        if candidate in originals:
+            return {candidate}
+    canonical = canonical_audio_name(stripped_name)
+    return {
+        original_name
+        for original_name in originals
+        if canonical and canonical_audio_name(original_name) == canonical
+    }
 
 
 def canonical_audio_name(name: str) -> str:
-    stem = Path(name).stem.casefold()
-    return re.sub(r"(?:[_-](?:64|128)kb|[_-]vbr)$", "", stem)
+    stem = name.strip().casefold()
+    while stem:
+        previous = stem
+        stem = re.sub(r"\.mp3$", "", stem)
+        stem = re.sub(
+            r"(?:[._\s-]+(?:(?:\d{2,4})?[._]?k[bpslex]*|128|vbr))$",
+            "",
+            stem,
+        )
+        if stem == previous:
+            break
+    return re.sub(r"[^a-z0-9]+", "", stem)
 
 
 def is_original_mp3(row: Mapping[str, Any]) -> bool:
-    name = str(row.get("name") or "")
     source = str(row.get("source") or "").casefold()
     format_name = str(row.get("format") or "").casefold()
-    return name.casefold().endswith(".mp3") and source == "original" and "mp3" in format_name
+    return source == "original" and "mp3" in format_name
 
 
 def archive_file(row: Mapping[str, Any]) -> ArchiveFile:
