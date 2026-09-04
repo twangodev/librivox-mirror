@@ -234,8 +234,27 @@ def test_load_sync_state_migrates_audio_statistics(book: Book, tmp_path, monkeyp
 
     state = publisher.load_sync_state()
 
-    assert state.schema_version == 3
+    assert state.schema_version == 4
     assert state.audio_seconds_by_language == {"English": 1}
+
+
+def test_publish_sync_state_does_not_rewrite_book_data(tmp_path) -> None:
+    api = FakeApi()
+    publisher = MissingRemotePublisher(
+        "owner/librivox",
+        token=None,
+        working_directory=tmp_path / "hub",
+        api=cast(HfApi, api),
+    )
+
+    result = publisher.publish_sync_state(
+        SyncState(catalog_watermark=123),
+        commit_message="chore(data): checkpoint catalog",
+    )
+
+    paths = {operation.path_in_repo for operation in api.commits[0][0]}
+    assert paths == {"README.md", "state/sync.json"}
+    assert result.state.catalog_watermark == 123
 
 
 def test_quarantine_replaces_current_artifact_and_metadata(book: Book, tmp_path) -> None:

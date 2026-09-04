@@ -252,6 +252,8 @@ class HubPublisher:
             )
         if state.schema_version < 3:
             state = state.model_copy(update={"schema_version": 3})
+        if state.schema_version < 4:
+            state = state.model_copy(update={"schema_version": 4})
         return state
 
     def quarantined_books(
@@ -351,7 +353,60 @@ class HubPublisher:
             artifacts,
             quarantines,
         )
-        updated_state = updated_state.model_copy(update={"updated_at": datetime.now(UTC)})
+        additions = [
+            CommitOperationAdd(
+                path_in_repo=artifact_repo_path(artifact.book.id),
+                path_or_fileobj=artifact.path,
+            )
+            for artifact in artifacts
+        ]
+        additions.extend(metadata_additions)
+        additions.extend(preview_additions)
+        deletions = [
+            CommitOperationDelete(path_in_repo=artifact_repo_path(update.book.id))
+            for update in quarantines
+            if self.api.file_exists(
+                self.repo_id,
+                artifact_repo_path(update.book.id),
+                repo_type="dataset",
+            )
+        ]
+        deletions.extend(preview_deletions)
+        return self._commit(
+            additions,
+            deletions,
+            updated_state,
+            commit_message=commit_message,
+            preview_available=preview_available,
+        )
+
+    def publish_sync_state(
+        self,
+        sync_state: SyncState,
+        *,
+        commit_message: str,
+    ) -> PublishResult:
+        """Publish a checkpoint update without rewriting any book data."""
+        self.ensure_repo()
+        preview_available = bool(self._load_rows(PREVIEW_METADATA_PATH))
+        return self._commit(
+            [],
+            [],
+            sync_state,
+            commit_message=commit_message,
+            preview_available=preview_available,
+        )
+
+    def _commit(
+        self,
+        additions: list[CommitOperationAdd],
+        deletions: list[CommitOperationDelete],
+        sync_state: SyncState,
+        *,
+        commit_message: str,
+        preview_available: bool,
+    ) -> PublishResult:
+        updated_state = sync_state.model_copy(update={"updated_at": datetime.now(UTC)})
         state_path = self.output_directory / "sync.json"
         state_path.write_text(
             json.dumps(
@@ -368,31 +423,13 @@ class HubPublisher:
             dataset_card(updated_state, self.repo_id, preview_available=preview_available)
         )
 
-        additions = [
-            CommitOperationAdd(
-                path_in_repo=artifact_repo_path(artifact.book.id),
-                path_or_fileobj=artifact.path,
-            )
-            for artifact in artifacts
-        ]
-        additions.extend(metadata_additions)
-        additions.extend(preview_additions)
+        additions = list(additions)
         additions.extend(
             [
                 CommitOperationAdd(path_in_repo="state/sync.json", path_or_fileobj=state_path),
                 CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=card_path),
             ]
         )
-        deletions = [
-            CommitOperationDelete(path_in_repo=artifact_repo_path(update.book.id))
-            for update in quarantines
-            if self.api.file_exists(
-                self.repo_id,
-                artifact_repo_path(update.book.id),
-                repo_type="dataset",
-            )
-        ]
-        deletions.extend(preview_deletions)
         parent_commit = self.api.repo_info(self.repo_id, repo_type="dataset").sha
         self.api.preupload_lfs_files(
             self.repo_id,

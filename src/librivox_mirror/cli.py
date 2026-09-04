@@ -40,6 +40,7 @@ from librivox_mirror.models import (
 )
 from librivox_mirror.state import RunLock, StateStore
 from librivox_mirror.streaming import ordered_parallel_map, prefetch
+from librivox_mirror.sync import select_catalog_catchup, select_incremental_sync
 from librivox_mirror.workflow import BookOutcome, BookProgress, MirrorRunner
 
 DEFAULT_STATE = Path(".librivox-mirror/state.sqlite3")
@@ -713,25 +714,69 @@ def sync(
         typer.Option(envvar="LIBRIVOX_MIRROR_USER_AGENT"),
     ] = DEFAULT_USER_AGENT,
 ) -> None:
-    """Publish daily LibriVox changes using a 48-hour overlap window."""
+    """Resume catalog catch-up, then maintain changes with a 48-hour overlap."""
     run_started = int(time.time())
     publisher = HubPublisher(repo, token=token, working_directory=staging / "hub")
     remote_state = publisher.load_sync_state()
-    since = max(0, remote_state.catalog_watermark - 48 * 60 * 60)
-    with LibriVoxCatalog(user_agent=user_agent) as catalog:
-        candidates = deduplicate(catalog.iter_books(since=since))
-        pending = [book for book in candidates if not publisher.has_current_book(book)]
-        selected = pending[:max_books]
-        if dry_run or not selected:
+    was_catching_up = remote_state.needs_catalog_catchup
+    scan_started_at = remote_state.catalog_scan_started_at or run_started
+    with LibriVoxCatalog(user_agent=user_agent, retry_forever=was_catching_up) as catalog:
+        if was_catching_up:
+            batch = select_catalog_catchup(catalog, publisher, remote_state, max_books)
+            completion_watermark = scan_started_at
+        else:
+            batch = select_incremental_sync(catalog, publisher, remote_state, max_books)
+            completion_watermark = run_started
+        selected = batch.books
+        logger.info(
+            "Catalog scan examined %s books and selected %s pending books; reached end: %s",
+            batch.scanned_count,
+            len(selected),
+            batch.reached_catalog_end,
+        )
+        scan_summary = {
+            "selected_count": len(selected),
+            "scanned_count": batch.scanned_count,
+            "reached_catalog_end": batch.reached_catalog_end,
+            "all_pending_selected": batch.all_pending_selected,
+            "was_catching_up": was_catching_up,
+        }
+        if dry_run:
             emit(
                 context,
                 {
                     "books": [book_summary(book) for book in selected],
-                    "candidate_count": len(candidates),
-                    "pending_count": len(pending),
-                    "complete_window": len(pending) <= max_books,
+                    **scan_summary,
                 },
-                f"{'Would sync' if dry_run else 'Found'} {len(selected)} pending books",
+                f"Would sync {len(selected)} pending books",
+            )
+            return
+        if not selected:
+            if was_catching_up and batch.all_pending_selected:
+                completed_state = remote_state.complete_catalog_scan(watermark=completion_watermark)
+                result = publisher.publish_sync_state(
+                    completed_state,
+                    commit_message="chore(data): complete LibriVox catalog catch-up",
+                )
+                emit(
+                    context,
+                    {
+                        "books": [],
+                        **scan_summary,
+                        "window_fully_processed": True,
+                        "revisions": [result.revision],
+                    },
+                    "Completed catalog catch-up with no pending books",
+                )
+                return
+            emit(
+                context,
+                {
+                    "books": [],
+                    **scan_summary,
+                    "window_fully_processed": True,
+                },
+                "Found 0 pending books",
             )
             return
         with (
@@ -756,9 +801,12 @@ def sync(
                 selected,
                 remote_state,
                 commit_size,
-                final_catalog_watermark=(run_started if len(pending) <= max_books else None),
+                final_catalog_watermark=(
+                    completion_watermark if batch.all_pending_selected else None
+                ),
+                catalog_scan_started_at=scan_started_at if was_catching_up else None,
             )
-    complete_window = len(pending) <= max_books and not any(
+    window_fully_processed = batch.all_pending_selected and not any(
         outcome["status"] == "failed" for outcome in outcomes
     )
     emit(
@@ -766,7 +814,8 @@ def sync(
         {
             "outcomes": outcomes,
             "revisions": revisions,
-            "complete_window": complete_window,
+            **scan_summary,
+            "window_fully_processed": window_fully_processed,
         },
         f"Synced {len(outcomes)} books",
     )
@@ -883,6 +932,7 @@ def publish_batches(
     sync_state: SyncState,
     commit_size: int,
     final_catalog_watermark: int | None = None,
+    catalog_scan_started_at: int | None = None,
     book_jobs: int = 1,
 ) -> tuple[list[dict[str, object]], list[str]]:
     if final_catalog_watermark is not None and not isinstance(books, Sized):
@@ -909,14 +959,16 @@ def publish_batches(
             has_failures = has_failures or any(outcome.error for outcome in batch)
             ids = [outcome.book.id for outcome in batch]
             batch_state = current_state
+            if catalog_scan_started_at is not None and not has_failures:
+                batch_state = batch_state.advance_catalog_cursor(
+                    started_at=catalog_scan_started_at, after_book_id=max(ids)
+                )
             if (
                 processed_books == total_books
                 and final_catalog_watermark is not None
                 and not has_failures
             ):
-                batch_state = current_state.model_copy(
-                    update={"catalog_watermark": final_catalog_watermark}
-                )
+                batch_state = batch_state.complete_catalog_scan(watermark=final_catalog_watermark)
             result = runner.publish(
                 batch,
                 batch_state,

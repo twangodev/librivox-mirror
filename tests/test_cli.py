@@ -13,8 +13,10 @@ from typer.testing import CliRunner
 
 from librivox_mirror.catalog import CATALOG_URL
 from librivox_mirror.cli import AppSettings, app, publish_batches
+from librivox_mirror.hub import PublishResult
 from librivox_mirror.models import Book, BookStatus, SyncState
 from librivox_mirror.state import RunLock, StateStore
+from librivox_mirror.sync import select_pending_batch
 from librivox_mirror.workflow import BookOutcome, MirrorRunner
 
 runner = CliRunner()
@@ -219,6 +221,50 @@ class OverlapRunner(RecordingRunner):
         return super().publish(outcomes, sync_state, commit_message=commit_message)
 
 
+class CurrentBookPublisher:
+    def __init__(self, current_ids: set[int]) -> None:
+        self.current_ids = current_ids
+
+    def has_current_book(self, book: Book) -> bool:
+        return book.id in self.current_ids
+
+
+def test_pending_catalog_batch_stops_at_the_ci_limit(book: Book) -> None:
+    books = [
+        book,
+        book,
+        book.model_copy(update={"id": 48}),
+        book.model_copy(update={"id": 49}),
+        book.model_copy(update={"id": 50}),
+    ]
+
+    batch = select_pending_batch(
+        books,
+        CurrentBookPublisher({book.id, 49}),
+        max_books=2,
+    )
+
+    assert [book.id for book in batch.books] == [48, 50]
+    assert batch.reached_catalog_end is False
+    assert batch.all_pending_selected is False
+    assert batch.scanned_count == 4
+
+
+def test_pending_catalog_batch_reports_a_complete_scan(book: Book) -> None:
+    books = [book, book.model_copy(update={"id": 48})]
+
+    batch = select_pending_batch(
+        books,
+        CurrentBookPublisher({book.id}),
+        max_books=2,
+    )
+
+    assert [book.id for book in batch.books] == [48]
+    assert batch.reached_catalog_end is True
+    assert batch.all_pending_selected is True
+    assert batch.scanned_count == 2
+
+
 def test_preparation_overlaps_publication(book: Book) -> None:
     books = [book, book.model_copy(update={"id": book.id + 1})]
     runner = OverlapRunner(books[1].id)
@@ -261,9 +307,112 @@ def test_failed_batches_do_not_advance_the_catalog_watermark(book: Book, monkeyp
         cast(Context, None),
         cast(MirrorRunner, runner),
         books,
-        SyncState(catalog_watermark=10),
+        SyncState(
+            catalog_watermark=10,
+            catalog_scan_started_at=15,
+            catalog_scan_after_book_id=40,
+        ),
         commit_size=1,
         final_catalog_watermark=20,
+        catalog_scan_started_at=15,
     )
 
     assert runner.states[-1].catalog_watermark == 10
+    assert runner.states[-1].catalog_scan_after_book_id == 40
+
+
+def test_catalog_catchup_checkpoints_each_published_batch(book: Book, monkeypatch) -> None:
+    books = [book, book.model_copy(update={"id": 48})]
+    runner = RecordingRunner()
+
+    def prepare(context, mirror_runner, batch, *, workers, capacity):
+        for item in batch:
+            yield BookOutcome(book=item, skipped=True)
+
+    monkeypatch.setattr("librivox_mirror.cli.prepare_books_stream", prepare)
+
+    publish_batches(
+        cast(Context, None),
+        cast(MirrorRunner, runner),
+        books,
+        SyncState(),
+        commit_size=1,
+        catalog_scan_started_at=100,
+    )
+
+    assert [state.catalog_scan_after_book_id for state in runner.states] == [book.id, 48]
+    assert all(state.catalog_scan_started_at == 100 for state in runner.states)
+
+
+def test_catalog_catchup_clears_cursor_when_the_scan_completes(book: Book, monkeypatch) -> None:
+    books = [book, book.model_copy(update={"id": 48})]
+    runner = RecordingRunner()
+
+    def prepare(context, mirror_runner, batch, *, workers, capacity):
+        for item in batch:
+            yield BookOutcome(book=item, skipped=True)
+
+    monkeypatch.setattr("librivox_mirror.cli.prepare_books_stream", prepare)
+
+    publish_batches(
+        cast(Context, None),
+        cast(MirrorRunner, runner),
+        books,
+        SyncState(),
+        commit_size=1,
+        final_catalog_watermark=100,
+        catalog_scan_started_at=100,
+    )
+
+    assert runner.states[-1].catalog_watermark == 100
+    assert runner.states[-1].catalog_scan_started_at is None
+    assert runner.states[-1].catalog_scan_after_book_id is None
+
+
+def test_sync_resumes_catchup_and_checkpoints_an_empty_tail(book: Book, monkeypatch) -> None:
+    published_states = []
+    catalog_calls = []
+
+    class FakePublisher:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def load_sync_state(self) -> SyncState:
+            return SyncState(
+                catalog_scan_started_at=100,
+                catalog_scan_after_book_id=book.id,
+            )
+
+        def has_current_book(self, candidate: Book) -> bool:
+            return True
+
+        def publish_sync_state(self, state: SyncState, *, commit_message: str) -> PublishResult:
+            published_states.append(state)
+            return PublishResult(revision="state-revision", state=state)
+
+    class FakeCatalog:
+        def __init__(self, *, user_agent: str, retry_forever: bool) -> None:
+            catalog_calls.append(("init", retry_forever))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            pass
+
+        def iter_books(self, *, since: int, start_id: int | None = None):
+            catalog_calls.append(("iter", since, start_id))
+            yield book.model_copy(update={"id": book.id + 1})
+
+    monkeypatch.setattr("librivox_mirror.cli.HubPublisher", FakePublisher)
+    monkeypatch.setattr("librivox_mirror.cli.LibriVoxCatalog", FakeCatalog)
+    monkeypatch.setattr("librivox_mirror.cli.time.time", lambda: 200)
+
+    result = runner.invoke(app, ["--json", "sync", "--repo", "owner/repo"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["window_fully_processed"] is True
+    assert catalog_calls == [("init", True), ("iter", 0, book.id + 1)]
+    assert published_states[0].catalog_watermark == 100
+    assert published_states[0].catalog_scan_started_at is None
+    assert published_states[0].catalog_scan_after_book_id is None

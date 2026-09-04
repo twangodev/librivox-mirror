@@ -345,7 +345,9 @@ class MirrorRunner:
                             revision=self.publisher.current_revision(),
                             state=self.publisher.load_sync_state(),
                         )
-                    current_state = self.publisher.load_sync_state()
+                    current_state = self.publisher.load_sync_state().with_catalog_progress_from(
+                        sync_state
+                    )
                 return self.publisher.publish(
                     artifacts,
                     quarantines,

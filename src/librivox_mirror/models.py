@@ -147,13 +147,46 @@ class QuarantineRecord(MirrorModel):
 
 
 class SyncState(MirrorModel):
-    schema_version: int = 3
+    schema_version: int = 4
     catalog_watermark: int = 0
+    catalog_scan_started_at: int | None = None
+    catalog_scan_after_book_id: int | None = None
     published_books: int = 0
     published_sections: int = 0
     quarantined_books: int = 0
     audio_seconds_by_language: dict[str, int] = Field(default_factory=dict)
     updated_at: datetime | None = None
+
+    @property
+    def needs_catalog_catchup(self) -> bool:
+        return self.catalog_watermark == 0
+
+    def advance_catalog_cursor(self, *, started_at: int, after_book_id: int) -> SyncState:
+        return self.model_copy(
+            update={
+                "catalog_scan_started_at": started_at,
+                "catalog_scan_after_book_id": after_book_id,
+            }
+        )
+
+    def complete_catalog_scan(self, *, watermark: int) -> SyncState:
+        return self.model_copy(
+            update={
+                "catalog_watermark": watermark,
+                "catalog_scan_started_at": None,
+                "catalog_scan_after_book_id": None,
+            }
+        )
+
+    def with_catalog_progress_from(self, intended: SyncState) -> SyncState:
+        """Reapply an uncommitted checkpoint without replacing refreshed dataset totals."""
+        return self.model_copy(
+            update={
+                "catalog_watermark": intended.catalog_watermark,
+                "catalog_scan_started_at": intended.catalog_scan_started_at,
+                "catalog_scan_after_book_id": intended.catalog_scan_after_book_id,
+            }
+        )
 
     @computed_field
     @property
