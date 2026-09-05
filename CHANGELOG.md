@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/twangodev/librivox-mirror/compare/v0.2.0...v0.2.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **sync:** resume catalog catch-up across CI runs ([5599c21](https://github.com/twangodev/librivox-mirror/commit/5599c21d2fd9a2f7718947df27211283ae885343))
+
 ## [0.2.0](https://github.com/twangodev/librivox-mirror/compare/v0.1.0...v0.2.0) (2026-09-01)
 
 
