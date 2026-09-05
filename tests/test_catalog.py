@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 import respx
 from tenacity import wait_none
 
@@ -79,11 +80,19 @@ def test_get_book_parses_normalized_fields_and_preserves_source_metadata() -> No
 
 
 @respx.mock
-def test_iter_books_paginates_until_a_short_page() -> None:
+@pytest.mark.parametrize(
+    "empty_page",
+    [
+        httpx.Response(200, json={"books": []}),
+        httpx.Response(404, json={"error": "Audiobooks could not be found"}),
+    ],
+    ids=["empty-list", "not-found"],
+)
+def test_iter_books_paginates_until_a_short_page(empty_page: httpx.Response) -> None:
     route = respx.get(CATALOG_URL).mock(
         side_effect=[
             httpx.Response(200, json=catalog_payload()),
-            httpx.Response(200, json={"books": []}),
+            empty_page,
         ]
     )
 
@@ -131,7 +140,13 @@ def test_iter_books_seeks_to_a_missing_start_id() -> None:
 
 
 @respx.mock
-def test_iter_books_seeks_past_the_catalog() -> None:
+@pytest.mark.parametrize(
+    ("start_id", "expected_ids", "expected_page_offsets"),
+    [(14, [15], [3]), (100, [], [])],
+)
+def test_iter_books_handles_out_of_range_seek_probes(
+    start_id: int, expected_ids: list[int], expected_page_offsets: list[int]
+) -> None:
     book_ids = [1, 3, 7, 15]
     page_offsets = []
     seek_limits = []
@@ -144,6 +159,8 @@ def test_iter_books_seeks_past_the_catalog() -> None:
             page_offsets.append(offset)
         else:
             seek_limits.append(limit)
+        if not selected:
+            return httpx.Response(404, json={"error": "Audiobooks could not be found"})
         return httpx.Response(
             200,
             json={"books": [{"id": str(book_id)} for book_id in selected]},
@@ -152,11 +169,38 @@ def test_iter_books_seeks_past_the_catalog() -> None:
     respx.get(CATALOG_URL).mock(side_effect=response)
 
     with LibriVoxCatalog(user_agent="test") as catalog:
-        books = list(catalog.iter_books(start_id=100))
+        books = list(catalog.iter_books(start_id=start_id))
 
-    assert books == []
-    assert page_offsets == []
+    assert [book.id for book in books] == expected_ids
+    assert page_offsets == expected_page_offsets
     assert set(seek_limits) == {1}
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(404, text="<html>Not found</html>"),
+        httpx.Response(404, json={"error": "Unknown endpoint"}),
+        httpx.Response(403, json={"error": "Audiobooks could not be found"}),
+    ],
+    ids=["html-not-found", "unknown-json-error", "forbidden"],
+)
+def test_catalog_errors_are_not_mistaken_for_exhaustion(response: httpx.Response) -> None:
+    respx.get(CATALOG_URL).mock(return_value=response)
+
+    with LibriVoxCatalog(user_agent="test") as catalog, pytest.raises(httpx.HTTPStatusError):
+        list(catalog.iter_books())
+
+
+@respx.mock
+def test_missing_book_request_keeps_its_http_error() -> None:
+    respx.get(CATALOG_URL).mock(
+        return_value=httpx.Response(404, json={"error": "Audiobooks could not be found"})
+    )
+
+    with LibriVoxCatalog(user_agent="test") as catalog, pytest.raises(httpx.HTTPStatusError):
+        catalog.get_book(999999)
 
 
 @respx.mock

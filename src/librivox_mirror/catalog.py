@@ -149,6 +149,14 @@ class LibriVoxCatalog:
 
     def _request_once(self, params: Mapping[str, str | int]) -> dict[str, Any]:
         response = self._client.get(CATALOG_URL, params={**params, "format": "json"})
+        if response.status_code == 404 and "offset" in params:
+            try:
+                error_payload = response.json()
+            except ValueError:
+                error_payload = None
+            # LibriVox reports an exhausted catalog query as this specific 404.
+            if error_payload == {"error": "Audiobooks could not be found"}:
+                return {"books": []}
         response.raise_for_status()
         return response.json()
 
