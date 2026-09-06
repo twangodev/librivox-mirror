@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.2.1](https://github.com/twangodev/librivox-mirror/compare/v0.2.0...v0.2.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **catalog:** handle empty-page responses during pagination ([d641805](https://github.com/twangodev/librivox-mirror/commit/d64180502d247d06c3fb8e890a1cfe91139487ab))
+* **sync:** resume catalog catch-up across CI runs ([5599c21](https://github.com/twangodev/librivox-mirror/commit/5599c21d2fd9a2f7718947df27211283ae885343))
+
 ## [0.2.0](https://github.com/twangodev/librivox-mirror/compare/v0.1.0...v0.2.0) (2026-09-01)
 
 
