@@ -22,6 +22,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: librivox-hub-writes
@@ -36,7 +37,7 @@ jobs:
     timeout-minutes: 330
     env:
       HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_OIDC_RESOURCE: datasets/${{ vars.HF_DATASET_REPO }}
       MAX_BOOKS: ${{ inputs.max_books || 20 }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -62,7 +63,7 @@ jobs:
     timeout-minutes: 330
     env:
       HF_DATASET_REPO: ${{ vars.HF_DATASET_REPO }}
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_OIDC_RESOURCE: datasets/${{ vars.HF_DATASET_REPO }}
       MAX_BOOKS: ${{ inputs.max_books || 20 }}
     steps:
       - uses: actions/checkout@v7.0.1
