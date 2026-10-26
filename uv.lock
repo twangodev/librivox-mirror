@@ -885,7 +885,7 @@ integration = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28" },
-    { name = "huggingface-hub", extras = ["hf-xet"], specifier = ">=1.0" },
+    { name = "huggingface-hub", extras = ["hf-xet"], specifier = ">=1.19.0" },
     { name = "mutagen", specifier = ">=1.47" },
     { name = "pyarrow", specifier = ">=21" },
     { name = "pydantic", specifier = ">=2.11" },
