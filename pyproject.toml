@@ -19,7 +19,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "huggingface-hub[hf-xet]>=1.0",
+    "huggingface-hub[hf-xet]>=1.19.0",
     "httpx>=0.28",
     "mutagen>=1.47",
     "pyarrow>=21",
