@@ -115,6 +115,11 @@ class FakePublisher:
         return SyncState()
 
 
+class QuarantinedPublisher(FakePublisher):
+    def has_current_book(self, book: Book, *, include_quarantined: bool = True) -> bool:
+        return include_quarantined
+
+
 class TransientPublisher(FakePublisher):
     def __init__(self) -> None:
         super().__init__()
@@ -159,6 +164,7 @@ def make_runner(
     *,
     publisher=None,
     staging_capacity=None,
+    retry_quarantined=False,
 ) -> MirrorRunner:
     return MirrorRunner(
         catalog=cast(LibriVoxCatalog, None),
@@ -168,6 +174,7 @@ def make_runner(
         publisher=publisher,
         source_index=publisher,
         staging_capacity=staging_capacity,
+        retry_quarantined=retry_quarantined,
     )
 
 
@@ -294,6 +301,22 @@ def test_current_hub_book_cleans_local_checkpoint_without_source_requests(
     assert not artifact.exists()
 
 
+def test_retry_quarantined_reprocesses_a_current_quarantine(book: Book, tmp_path) -> None:
+    publisher = QuarantinedPublisher()
+    with StateStore(tmp_path / "state.sqlite3") as state:
+        outcome = make_runner(
+            book,
+            PreparedArchive(book, tmp_path),
+            tmp_path,
+            state,
+            publisher=publisher,
+            retry_quarantined=True,
+        ).prepare_book(book)
+
+    assert outcome.artifact is not None
+    assert not outcome.skipped
+
+
 def test_publish_removes_packed_checkpoint_files(book: Book, tmp_path) -> None:
     publisher = FakePublisher()
     with StateStore(tmp_path / "state.sqlite3") as state:
@@ -390,8 +413,30 @@ def test_resilient_preparation_retries_artifact_build_failures(
     assert checkpoint.attempt_count == 2
 
 
-def test_publish_retries_transient_hub_failures(book: Book, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "intended_state",
+    [
+        SyncState(catalog_scan_started_at=100, catalog_scan_after_book_id=47),
+        SyncState(catalog_watermark=100),
+    ],
+    ids=["catchup-cursor", "completed-watermark"],
+)
+def test_publish_retry_preserves_checkpoint_and_refreshes_totals(
+    book: Book, tmp_path, monkeypatch, intended_state: SyncState
+) -> None:
     publisher = TransientPublisher()
+    monkeypatch.setattr(
+        publisher,
+        "load_sync_state",
+        lambda: SyncState(
+            catalog_scan_started_at=90,
+            catalog_scan_after_book_id=40,
+            published_books=123,
+            published_sections=456,
+            quarantined_books=7,
+            audio_seconds_by_language={"English": 3600},
+        ),
+    )
     monkeypatch.setattr("librivox_mirror.workflow.time.sleep", lambda _: None)
     with StateStore(tmp_path / "state.sqlite3") as state:
         runner = make_runner(
@@ -402,10 +447,17 @@ def test_publish_retries_transient_hub_failures(book: Book, tmp_path, monkeypatc
             publisher=publisher,
         )
         outcome = runner.prepare_book(book)
-        result = runner.publish([outcome], SyncState(), commit_message="test")
+        result = runner.publish([outcome], intended_state, commit_message="test")
 
     assert result is not None
     assert publisher.attempts == 2
+    assert result.state.catalog_watermark == intended_state.catalog_watermark
+    assert result.state.catalog_scan_started_at == intended_state.catalog_scan_started_at
+    assert result.state.catalog_scan_after_book_id == intended_state.catalog_scan_after_book_id
+    assert result.state.published_books == 123
+    assert result.state.published_sections == 456
+    assert result.state.quarantined_books == 7
+    assert result.state.audio_seconds_by_language == {"English": 3600}
 
 
 def test_publish_recovers_an_ambiguous_success_without_duplicate_commit(

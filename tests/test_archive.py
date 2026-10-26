@@ -3,18 +3,21 @@ import json
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier, Event, Lock
+from typing import Any, cast
 
 import httpx
 import pytest
 
 from librivox_mirror.archive import (
     DOWNLOAD_ATTEMPTS,
+    ArchiveItemMissingError,
     DownloadIntegrityError,
     DownloadPool,
     InternetArchiveClient,
     QuarantinedBookError,
     SourceUnavailableError,
     archive_identifier,
+    archive_identifiers,
     resolve_original_files,
     verify_download,
 )
@@ -85,7 +88,40 @@ def archive_rows() -> list[dict[str, str]]:
 def test_archive_identifier_accepts_details_and_download_urls() -> None:
     assert archive_identifier("https://archive.org/details/a_book") == "a_book"
     assert archive_identifier("https://archive.org/download/a_book/file.mp3") == "a_book"
+    assert archive_identifier("https://archive.org/compress/a_book/formats=MP3") == "a_book"
     assert archive_identifier("") is None
+
+
+def test_archive_identifiers_fall_back_to_published_section_urls(book: Book) -> None:
+    missing = book.model_copy(update={"url_iarchive": "", "url_zip_file": None})
+
+    assert archive_identifiers(missing) == ("a_test_book",)
+    assert archive_identifiers(missing.model_copy(update={"url_librivox": ""})) == ()
+
+
+def test_book_resolution_tries_each_archive_identifier(book: Book) -> None:
+    class FallbackClient(InternetArchiveClient):
+        def __init__(self) -> None:
+            self.requested = []
+
+        def _get_metadata(self, identifier):
+            self.requested.append(identifier)
+            if identifier != "a_test_book":
+                raise ArchiveItemMissingError(identifier)
+            return {"files": archive_rows(), "metadata": {"title": "Archive title"}}
+
+    client = FallbackClient()
+    fallback_book = book.model_copy(
+        update={
+            "url_iarchive": "https://archive.org/details/missing_book",
+            "url_zip_file": "https://archive.org/compress/dark_book/formats=MP3",
+        }
+    )
+
+    resolved = client.resolve_book(fallback_book)
+
+    assert resolved.archive_identifier == "a_test_book"
+    assert client.requested == ["missing_book", "dark_book", "a_test_book"]
 
 
 def test_resolve_original_files_follows_derivative_provenance(book: Book) -> None:
@@ -100,6 +136,71 @@ def test_resolve_original_files_follows_derivative_provenance(book: Book) -> Non
     assert selected.name == "chapter.mp3"
     assert json.loads(selected.source_metadata_json)["future_archive_field"] == "preserved"
     assert json.loads(resolved.archive_metadata_json)["future_item_field"] is True
+
+
+def test_file_name_is_used_when_the_listen_url_is_stale(book: Book) -> None:
+    section = book.sections[0].model_copy(update={"file_name": "correct_128kb.mp3"})
+    rows = [
+        {
+            "name": "correct_128kb.mp3",
+            "source": "original",
+            "format": "VBR MP3",
+            "size": "1",
+        },
+    ]
+
+    resolved = resolve_original_files(book.model_copy(update={"sections": (section,)}), "id", rows)
+
+    assert resolved.sections[0].archive_file.name == "correct_128kb.mp3"
+
+
+def test_listen_url_provenance_wins_when_catalog_fields_conflict(book: Book) -> None:
+    section = book.sections[0].model_copy(update={"file_name": "wrong.mp3"})
+    rows = [
+        *archive_rows(),
+        {"name": "wrong.mp3", "source": "original", "format": "VBR MP3", "size": "1"},
+    ]
+
+    resolved = resolve_original_files(book.model_copy(update={"sections": (section,)}), "id", rows)
+
+    assert resolved.sections[0].archive_file.name == "chapter.mp3"
+
+
+def test_malformed_bitrate_suffix_resolves_uniquely(book: Book) -> None:
+    section = book.sections[0].model_copy(update={"file_name": "chapter_128kp.mp3"})
+    rows = [
+        {
+            "name": "chapter_128kb.mp3",
+            "source": "original",
+            "format": "VBR MP3",
+            "size": "1",
+        },
+    ]
+
+    resolved = resolve_original_files(book.model_copy(update={"sections": (section,)}), "id", rows)
+
+    assert resolved.sections[0].archive_file.name == "chapter_128kb.mp3"
+
+
+def test_archive_format_can_identify_an_extensionless_original(book: Book) -> None:
+    rows = [
+        {
+            "name": "chapter_64kb.mp3",
+            "source": "derivative",
+            "format": "64Kbps MP3",
+            "original": "chapter_128kb_mp3",
+        },
+        {
+            "name": "chapter_128kb_mp3",
+            "source": "original",
+            "format": "VBR MP3",
+            "size": "1",
+        },
+    ]
+
+    resolved = resolve_original_files(book, "id", rows)
+
+    assert resolved.sections[0].archive_file.name == "chapter_128kb_mp3"
 
 
 def test_book_resolution_fetches_metadata_concurrently(book: Book) -> None:
@@ -133,11 +234,18 @@ def test_book_resolution_fetches_metadata_concurrently(book: Book) -> None:
     ]
 
 
-def test_missing_archive_item_is_quarantined(book: Book) -> None:
+def test_missing_archive_item_is_retried_then_quarantined(book: Book, monkeypatch) -> None:
+    attempts = 0
+
+    def missing_response(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, json={})
+
+    retrying = cast(Any, InternetArchiveClient._get_metadata).retry
+    monkeypatch.setattr(retrying, "sleep", lambda _: None)
     with (
-        httpx.Client(
-            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={}))
-        ) as http_client,
+        httpx.Client(transport=httpx.MockTransport(missing_response)) as http_client,
         InternetArchiveClient(
             user_agent="librivox-mirror-tests",
             request_delay=0,
@@ -149,6 +257,7 @@ def test_missing_archive_item_is_quarantined(book: Book) -> None:
         archive.resolve_book(book)
 
     assert caught.value.record.code == QuarantineCode.ARCHIVE_ITEM_MISSING
+    assert attempts == 5
 
 
 def test_missing_original_quarantines_the_entire_book(book: Book) -> None:

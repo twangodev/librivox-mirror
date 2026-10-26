@@ -4,6 +4,7 @@ import json
 import shutil
 import tarfile
 from collections import Counter
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from importlib.resources import files
@@ -27,9 +28,11 @@ from huggingface_hub.errors import (
     RepositoryNotFoundError,
 )
 
+from librivox_mirror.catalog import parse_book
 from librivox_mirror.models import (
     Book,
     BookArtifact,
+    QuarantineCode,
     QuarantineRecord,
     SyncState,
 )
@@ -249,7 +252,31 @@ class HubPublisher:
             )
         if state.schema_version < 3:
             state = state.model_copy(update={"schema_version": 3})
+        if state.schema_version < 4:
+            state = state.model_copy(update={"schema_version": 4})
         return state
+
+    def quarantined_books(
+        self,
+        *,
+        codes: Collection[QuarantineCode] | None = None,
+    ) -> list[Book]:
+        selected_codes = {str(code) for code in codes} if codes is not None else None
+        paths = sorted(
+            path
+            for path in self.api.list_repo_files(self.repo_id, repo_type="dataset")
+            if path.startswith("metadata/quarantine/") and path.endswith(".parquet")
+        )
+        books = []
+        for row in (row for path in paths for row in self._load_rows(path)):
+            if selected_codes is not None and str(row["code"]) not in selected_codes:
+                continue
+            metadata = row["librivox_metadata"]
+            payload = json.loads(metadata) if isinstance(metadata, str) else metadata
+            if not isinstance(payload, Mapping):
+                raise ValueError(f"book {row['book_id']} has invalid LibriVox metadata")
+            books.append(parse_book(payload))
+        return sorted(books, key=lambda book: book.id)
 
     def _load_audio_seconds_by_language(self) -> dict[str, int]:
         paths = self.api.list_repo_files(self.repo_id, repo_type="dataset")
@@ -261,7 +288,7 @@ class HubPublisher:
         sections = [row for path in section_paths for row in self._load_rows(path)]
         return audio_seconds_by_language(sections)
 
-    def has_current_book(self, book: Book) -> bool:
+    def has_current_book(self, book: Book, *, include_quarantined: bool = True) -> bool:
         bucket = book.metadata_bucket
         books = self._load_rows(metadata_path("books", bucket))
         if any(
@@ -269,6 +296,8 @@ class HubPublisher:
             for row in books
         ):
             return True
+        if not include_quarantined:
+            return False
         quarantined = self._load_rows(metadata_path("quarantine", bucket))
         return any(
             row["book_id"] == book.id and row["source_fingerprint"] == book.source_fingerprint
@@ -324,7 +353,60 @@ class HubPublisher:
             artifacts,
             quarantines,
         )
-        updated_state = updated_state.model_copy(update={"updated_at": datetime.now(UTC)})
+        additions = [
+            CommitOperationAdd(
+                path_in_repo=artifact_repo_path(artifact.book.id),
+                path_or_fileobj=artifact.path,
+            )
+            for artifact in artifacts
+        ]
+        additions.extend(metadata_additions)
+        additions.extend(preview_additions)
+        deletions = [
+            CommitOperationDelete(path_in_repo=artifact_repo_path(update.book.id))
+            for update in quarantines
+            if self.api.file_exists(
+                self.repo_id,
+                artifact_repo_path(update.book.id),
+                repo_type="dataset",
+            )
+        ]
+        deletions.extend(preview_deletions)
+        return self._commit(
+            additions,
+            deletions,
+            updated_state,
+            commit_message=commit_message,
+            preview_available=preview_available,
+        )
+
+    def publish_sync_state(
+        self,
+        sync_state: SyncState,
+        *,
+        commit_message: str,
+    ) -> PublishResult:
+        """Publish a checkpoint update without rewriting any book data."""
+        self.ensure_repo()
+        preview_available = bool(self._load_rows(PREVIEW_METADATA_PATH))
+        return self._commit(
+            [],
+            [],
+            sync_state,
+            commit_message=commit_message,
+            preview_available=preview_available,
+        )
+
+    def _commit(
+        self,
+        additions: list[CommitOperationAdd],
+        deletions: list[CommitOperationDelete],
+        sync_state: SyncState,
+        *,
+        commit_message: str,
+        preview_available: bool,
+    ) -> PublishResult:
+        updated_state = sync_state.model_copy(update={"updated_at": datetime.now(UTC)})
         state_path = self.output_directory / "sync.json"
         state_path.write_text(
             json.dumps(
@@ -341,31 +423,13 @@ class HubPublisher:
             dataset_card(updated_state, self.repo_id, preview_available=preview_available)
         )
 
-        additions = [
-            CommitOperationAdd(
-                path_in_repo=artifact_repo_path(artifact.book.id),
-                path_or_fileobj=artifact.path,
-            )
-            for artifact in artifacts
-        ]
-        additions.extend(metadata_additions)
-        additions.extend(preview_additions)
+        additions = list(additions)
         additions.extend(
             [
                 CommitOperationAdd(path_in_repo="state/sync.json", path_or_fileobj=state_path),
                 CommitOperationAdd(path_in_repo="README.md", path_or_fileobj=card_path),
             ]
         )
-        deletions = [
-            CommitOperationDelete(path_in_repo=artifact_repo_path(update.book.id))
-            for update in quarantines
-            if self.api.file_exists(
-                self.repo_id,
-                artifact_repo_path(update.book.id),
-                repo_type="dataset",
-            )
-        ]
-        deletions.extend(preview_deletions)
         parent_commit = self.api.repo_info(self.repo_id, repo_type="dataset").sha
         self.api.preupload_lfs_files(
             self.repo_id,
